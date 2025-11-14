@@ -1,0 +1,313 @@
+// ===================================
+// 🛰️ ARDUINO SATÉLITE - VERSIÓN 2.4
+// DHT11 + Ultrasonidos + Servo + Media en Arduino opcional + Protocolo
+// ===================================
+
+#include <SoftwareSerial.h>
+#include <DHT.h>
+#include <Servo.h>
+
+#define DHTPIN 2
+#define DHTTYPE DHT11
+DHT dht(DHTPIN, DHTTYPE);
+
+const int led1 = 13;
+SoftwareSerial mySerial(10, 11); // Comunicación con Arduino Tierra (RX,TX para SoftwareSerial)
+
+// --------------------
+// Sensor ultrasonidos + servo
+// --------------------
+Servo servoMotor;
+const int trigPin = 6;
+const int echoPin = 7;
+bool modoBarrido = true;          // barrido automático (puede activarse/desactivarse con 6:1/6:0)
+int anguloActual = 0;             // posición servo actual (0..180)
+bool falloDistancia = false;
+unsigned long tiempoUltimoBarrido = 0;
+unsigned long intervaloBarrido = 500; // ms entre posiciones del barrido (configurable por comando 7)
+
+// --------------------
+// Transmisión DHT y media en Arduino
+// --------------------
+bool transmitiendo = false;
+unsigned long nextHT = 0;
+unsigned long intervalo = 3000; // periodo default en ms (3s) -> configurable por comando 1
+bool esperandoTimeout = false;
+unsigned long nextTimeoutHT = 0;
+
+// Media en Arduino
+bool arduinoComputeAvg = false;      // si true, Arduino calcula media y la envía con A:<avg>
+const int MAX_WINDOW = 100;          // buffer máximo
+float tempBuffer[MAX_WINDOW];
+int tempCount = 0;
+int windowN = 10;                    // ventana por defecto para la media (configurable por comando 9)
+
+// --------------------
+// Funciones auxiliares
+// --------------------
+void pushTemp(float t) {
+  if (tempCount < MAX_WINDOW) {
+    tempBuffer[tempCount++] = t;
+  } else {
+    // shift left 1
+    for (int i = 0; i < MAX_WINDOW-1; ++i) tempBuffer[i] = tempBuffer[i+1];
+    tempBuffer[MAX_WINDOW-1] = t;
+  }
+}
+
+float computeAvgArduino() {
+  int usable = min(tempCount, windowN);
+  if (usable <= 0) return NAN;
+  float s = 0;
+  for (int i = tempCount - usable; i < tempCount; ++i) s += tempBuffer[i];
+  return s / (float)usable;
+}
+
+// --------------------
+// Función medición ultrasónica
+// --------------------
+float medirDistancia() {
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+
+  long duracion = pulseIn(echoPin, HIGH, 25000); // timeout 25ms (~4.3m)
+  if (duracion == 0) return -1;
+  float distancia = duracion * 0.034 / 2.0; // cm
+  return distancia;
+}
+
+// --------------------
+// Barrido automático y envío datos ultrasónicos
+// --------------------
+void barridoUltrasonico() {
+  if (!modoBarrido) return;
+
+  if (millis() - tiempoUltimoBarrido >= intervaloBarrido) {
+    tiempoUltimoBarrido = millis();
+
+    anguloActual += 15;               // paso 5° (más suave). Cambia si prefieres otra resolución.
+    if (anguloActual > 180) anguloActual = 0;
+    servoMotor.write(anguloActual);
+
+    float distancia = medirDistancia();
+    if (distancia < 0 || distancia > 400) {
+      falloDistancia = true;
+      mySerial.println("6:"); // fallo sensor distancia
+    } else {
+      falloDistancia = false;
+      // Enviar distancia con formato: 2:<ángulo>:<distancia>
+      mySerial.print("2:");
+      mySerial.print(anguloActual);
+      mySerial.print(":");
+      mySerial.println(distancia, 2);
+    }
+  }
+}
+
+// --------------------
+// Procesamiento de comandos desde tierra
+// --------------------
+void procesarComando(String comando) {
+  comando.trim();
+  if (comando.length() == 0) return;
+
+  // Comandos literales
+  if (comando == "Iniciar") {
+    transmitiendo = true;
+    nextHT = millis() + intervalo;
+    mySerial.println("5:Transmisión iniciada");
+    return;
+  }
+
+  if (comando == "Parar") {
+    transmitiendo = false;
+    mySerial.println("5:Transmisión detenida");
+    return;
+  }
+
+  // Código:param
+  int fin = comando.indexOf(':');
+  int codigo = (fin == -1) ? comando.toInt() : comando.substring(0, fin).toInt();
+  int inicio = (fin == -1) ? comando.length() : fin + 1;
+
+  switch (codigo) {
+    case 1: { // Cambiar periodo DHT -> "1:<segundos>"
+      String param = comando.substring(inicio);
+      unsigned long nuevoSegs = param.toInt();
+      if (nuevoSegs >= 1 && nuevoSegs <= 3600) {
+        intervalo = nuevoSegs * 1000UL;
+        nextHT = millis() + intervalo;
+        mySerial.println("5:Periodo DHT cambiado");
+      } else {
+        mySerial.println("5:Periodo DHT inválido");
+      }
+      break;
+    }
+
+    case 2: { // Cambiar ángulo servo manual -> "2:<angulo>"
+      String p = comando.substring(inicio);
+      int ang = p.toInt();
+      if (ang < 0) ang = 0;
+      if (ang > 180) ang = 180;
+      servoMotor.write(ang);
+      anguloActual = ang;
+      modoBarrido = false;
+      mySerial.print("5:Servo en ");
+      mySerial.println(ang);
+      break;
+    }
+
+    case 3: { // Parar transmisión
+      transmitiendo = false;
+      mySerial.println("5:Transmisión detenida");
+      break;
+    }
+
+    case 4: { // Reanudar transmisión
+      transmitiendo = true;
+      nextHT = millis() + intervalo;
+      mySerial.println("5:Transmisión reanudada");
+      break;
+    }
+
+    case 5: { // Solicitud estado
+      mySerial.println("5:OK");
+      break;
+    }
+
+    case 6: { // Activar/desactivar barrido automático -> "6:1" o "6:0"
+      String modo = comando.substring(inicio);
+      if (modo == "1") {
+        modoBarrido = true;
+        mySerial.println("5:Barrido activado");
+      } else {
+        modoBarrido = false;
+        mySerial.println("5:Barrido detenido");
+      }
+      break;
+    }
+
+    case 7: { // Cambiar intervalo de ultrasonidos (ms) -> "7:<ms>"
+      String p = comando.substring(inicio);
+      unsigned long msval = p.toInt();
+      if (msval < 50) msval = 50; // mínimo 50ms para no saturar
+      if (msval > 10000) msval = 10000;
+      intervaloBarrido = msval;
+      mySerial.print("5:Intervalo ultrasonidos=");
+      mySerial.println(intervaloBarrido);
+      break;
+    }
+
+    case 8: { // Activar/desactivar cálculo de media en Arduino -> "8:1" (on) / "8:0" (off)
+      String p = comando.substring(inicio);
+      if (p == "1") {
+        arduinoComputeAvg = true;
+        mySerial.println("5:Media en Arduino activada");
+      } else {
+        arduinoComputeAvg = false;
+        mySerial.println("5:Media en Arduino desactivada");
+      }
+      break;
+    }
+
+    case 9: { // Ajustar ventana de media en Arduino -> "9:<N>"
+      String p = comando.substring(inicio);
+      int n = p.toInt();
+      if (n < 1) n = 1;
+      if (n > MAX_WINDOW) n = MAX_WINDOW;
+      windowN = n;
+      mySerial.print("5:WindowN=");
+      mySerial.println(windowN);
+      break;
+    }
+
+    default: {
+      mySerial.println("5:Comando desconocido");
+      break;
+    }
+  }
+}
+
+// --------------------
+// Setup
+// --------------------
+void setup() {
+  pinMode(led1, OUTPUT);
+  pinMode(trigPin, OUTPUT);
+  pinMode(echoPin, INPUT);
+
+  servoMotor.attach(9);
+  anguloActual = 90;
+  servoMotor.write(anguloActual);
+
+  dht.begin();
+
+  Serial.begin(9600);
+  mySerial.begin(9600);
+  mySerial.println("5:Satélite listo");
+}
+
+// --------------------
+// Loop principal
+// --------------------
+void loop() {
+  // 1) procesar comandos entrantes
+  if (mySerial.available()) {
+    String comando = mySerial.readStringUntil('\n');
+    comando.trim();
+    procesarComando(comando);
+  }
+
+  // 2) envio periódico de datos DHT si transmitiendo
+  if (transmitiendo && (long)(millis() - nextHT) >= 0) {
+    nextHT = millis() + intervalo;
+
+    float h = dht.readHumidity();
+    float t = dht.readTemperature();
+
+    if (isnan(h) || isnan(t)) {
+      if (!esperandoTimeout) {
+        esperandoTimeout = true;
+        nextTimeoutHT = millis() + 5000;
+      }
+      if (esperandoTimeout && millis() >= nextTimeoutHT) {
+        mySerial.println("3:"); // fallo DHT
+        esperandoTimeout = false;
+      }
+    } else {
+      esperandoTimeout = false;
+      // push temp for Arduino-side average
+      pushTemp(t);
+
+      // produce output: if Arduino computing avg, include :A:<avg>
+      if (arduinoComputeAvg) {
+        float avg = computeAvgArduino();
+        mySerial.print("1:");
+        mySerial.print(t, 2);
+        mySerial.print(":");
+        mySerial.print(h, 2);
+        mySerial.print(":A:");
+        if (isnan(avg)) mySerial.println("nan");
+        else mySerial.println(avg, 2);
+      } else {
+        mySerial.print("1:");
+        mySerial.print(t, 2);
+        mySerial.print(":");
+        mySerial.println(h, 2);
+      }
+
+      // indicador LED (pequeño blink no crítico)
+      digitalWrite(led1, HIGH);
+      delay(120);
+      digitalWrite(led1, LOW);
+    }
+  }
+
+  // 3) barrido ultrasónico si transmitiendo
+  if (transmitiendo) {
+    barridoUltrasonico();
+  }
+}
