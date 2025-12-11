@@ -336,7 +336,8 @@ def abrir_radar():
     canvas_r.draw()
     canvas_r.get_tk_widget().pack(fill=BOTH, expand=True)
 
-    def actualizar_radar_local():
+ def actualizar_radar_local():
+    if last_angle_received is not None:
         ax_r.clear()
         ax_r.set_facecolor("black")
         ax_r.set_theta_zero_location('N')
@@ -346,17 +347,14 @@ def abrir_radar():
         ax_r.set_thetamax(180)
         ax_r.set_title("Radar ultrasónico", color='green')
 
-        if radar_angulos:
-            t = [math.radians(a) for a in radar_angulos]
-            r = radar_distancias
-            if len(t) > 1:
-                ax_r.plot(t, r, color='lime', linewidth=1.2)
-            ax_r.scatter([t[-1]], [r[-1]], c='lime', s=100, edgecolors='k')
+        t = [math.radians(a) for a in radar_angulos]
+        r = radar_distancias
+        if len(t) > 1:
+            ax_r.plot(t, r, color='lime', linewidth=1.2)
+        ax_r.scatter([t[-1]], [r[-1]], c='lime', s=100, edgecolors='k')
 
         canvas_r.draw()
-        ventana_radar.after(200, actualizar_radar_local)
 
-    actualizar_radar_local()
 Button(controls_frame, text="Abrir Radar", command=abrir_radar, width=18, bg="#036D03").grid(row=31,column=0,pady=(4,6))
 
 
