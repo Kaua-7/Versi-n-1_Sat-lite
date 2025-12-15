@@ -1,281 +1,306 @@
-// ===================================
-// 🛰️ ARDUINO SATÉLITE - VERSIÓN 3.1
-// DHT11 + Ultrasonidos + Servo + Media en Arduino opcional + Simulación orbital + Protocolo con checksum
-// ===================================
+// =====================================================
+// 🛰️ SATÉLITE v4.4 FINAL
+// DHT + Ultrasonidos + Servo + Órbita + Checksum + LoRa
+// =====================================================
 
 #include <SoftwareSerial.h>
 #include <DHT.h>
 #include <Servo.h>
 
+// ------------------ PINES ------------------
 #define DHTPIN 2
 #define DHTTYPE DHT11
+#define TRIGPIN 6
+#define ECHOPIN 7
+#define SERVOPIN 9
+#define MOTORPIN 12
+#define LEDRX 13
+
+// ------------------ OBJETOS ------------------
+SoftwareSerial mySerial(10, 11); // RX, TX hacia estación
 DHT dht(DHTPIN, DHTTYPE);
-
-const int led1 = 13;
-SoftwareSerial mySerial(10, 11); // Comunicación con Arduino Tierra (RX,TX)
-
 Servo servoMotor;
-const int trigPin = 6;
-const int echoPin = 7;
-bool modoBarrido = true;
-int anguloActual = 0;
-bool falloDistancia = false;
-unsigned long tiempoUltimoBarrido = 0;
-unsigned long intervaloBarrido = 1500; // ms entre posiciones del barrido
-const int pasoServo = 5;               // paso más pequeño para suavizar
 
+// ------------------ ESTADO GLOBAL ------------------
 bool transmitiendo = false;
-unsigned long nextHT = 0;
-unsigned long intervalo = 5000; // periodo default 5s
-bool esperandoTimeout = false;
-unsigned long nextTimeoutHT = 0;
-
+bool modoBarrido = false;
 bool arduinoComputeAvg = false;
-const int MAX_WINDOW = 100;
+
+// ------------------ TIEMPOS ------------------
+unsigned long intervaloHT = 5000;
+unsigned long nextHT = 0;
+
+unsigned long intervaloServo = 1000;   // servo cada 1 s
+unsigned long nextServo = 0;
+
+unsigned long intervaloUltra = 1000;   // radar ligado al servo
+
+unsigned long intervaloOrbit = 3000;
+unsigned long nextOrbit = 0;
+
+// ------------------ SERVO ------------------
+int angulo = 0;
+int direccion = 1;
+const int PASO = 30;
+
+// ------------------ MEDIA TEMPERATURA ------------------
+#define MAX_WINDOW 100
 float tempBuffer[MAX_WINDOW];
 int tempCount = 0;
 int windowN = 10;
 
-// ======================
-// ORBIT SIMULATION
-// ======================
+// ------------------ ÓRBITA ------------------
 const double G = 6.67430e-11;
 const double M = 5.97219e24;
 const double R_EARTH = 6371000;
 const double ALTITUDE = 400000;
-const double EARTH_ROTATION_RATE = 7.2921159e-5;
-const unsigned long MILLIS_BETWEEN_UPDATES = 1000;
 const double TIME_COMPRESSION = 90.0;
 
-unsigned long nextUpdateOrbit = 0;
+double r;
 double real_orbital_period;
-double r;  // distance from Earth's center
 
-// ======================
-// FUNCIONES CHECKSUM
-// ======================
+// =====================================================
+// CHECKSUM
+// =====================================================
 unsigned int checksum(String msg) {
   unsigned int sum = 0;
   for (unsigned int i = 0; i < msg.length(); i++) sum += msg[i];
   return sum % 256;
 }
 
-void sendWithChecksum(String msg) {
-  unsigned int chk = checksum(msg);
+void sendMsg(String msg) {
   mySerial.print("CHK:");
   mySerial.print(msg);
   mySerial.print(":");
-  mySerial.println(chk);
+  mySerial.println(checksum(msg));
 }
 
-// ======================
-// FUNCIONES AUXILIARES
-// ======================
-void pushTemp(float t) {
-  if (tempCount < MAX_WINDOW) tempBuffer[tempCount++] = t;
-  else {
-    for (int i = 0; i < MAX_WINDOW-1; i++) tempBuffer[i] = tempBuffer[i+1];
-    tempBuffer[MAX_WINDOW-1] = t;
-  }
+// =====================================================
+// LIMPIAR CHECKSUM ENTRANTE (CLAVE)
+// =====================================================
+String limpiarChecksum(String raw) {
+  raw.trim();
+  if (!raw.startsWith("CHK:")) return raw;
+
+  raw = raw.substring(4);               // quitar "CHK:"
+  int lastColon = raw.lastIndexOf(':');  // quitar checksum
+  if (lastColon > 0) raw = raw.substring(0, lastColon);
+  return raw;
 }
 
-float computeAvgArduino() {
-  int usable = min(tempCount, windowN);
-  if (usable <= 0) return NAN;
-  float s = 0;
-  for (int i = tempCount - usable; i < tempCount; i++) s += tempBuffer[i];
-  return s / (float)usable;
-}
-
+// =====================================================
+// DISTANCIA ULTRASONIDOS (cm)
+// =====================================================
 float medirDistancia() {
-  digitalWrite(trigPin, LOW);
-  delayMicroseconds(2);
-  digitalWrite(trigPin, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(trigPin, LOW);
+  digitalWrite(TRIGPIN, LOW); delayMicroseconds(2);
+  digitalWrite(TRIGPIN, HIGH); delayMicroseconds(10);
+  digitalWrite(TRIGPIN, LOW);
 
-  long duracion = pulseIn(echoPin, HIGH, 25000);
+  long duracion = pulseIn(ECHOPIN, HIGH, 25000);
   if (duracion == 0) return -1;
   return duracion * 0.034 / 2.0;
 }
 
-void barridoUltrasonico() {
-  if (!modoBarrido) return;
-  if (millis() - tiempoUltimoBarrido >= intervaloBarrido) {
-    tiempoUltimoBarrido = millis();
-    anguloActual += pasoServo;
-    if (anguloActual > 180) anguloActual = 0;
-    servoMotor.write(anguloActual);
-
-    float distancia = medirDistancia();
-    if (distancia < 0 || distancia > 400) {
-      falloDistancia = true;
-      sendWithChecksum("6:"); // fallo sensor distancia
-    } else {
-      falloDistancia = false;
-      String msg = "2:" + String(anguloActual) + ":" + String(distancia,2);
-      sendWithChecksum(msg);
-    }
+// =====================================================
+// MEDIA TEMPERATURA
+// =====================================================
+void pushTemp(float t) {
+  if (tempCount < MAX_WINDOW) tempBuffer[tempCount++] = t;
+  else {
+    for (int i = 0; i < MAX_WINDOW - 1; i++)
+      tempBuffer[i] = tempBuffer[i + 1];
+    tempBuffer[MAX_WINDOW - 1] = t;
   }
 }
 
-// ======================
-// PROCESAR COMANDOS
-// ======================
-void procesarComando(String comando) {
-  comando.trim();
-  if (comando.length() == 0) return;
-
-  if (comando == "Iniciar") {
-    transmitiendo = true;
-    nextHT = millis() + intervalo;
-    sendWithChecksum("5:Transmisión iniciada");
-    return;
-  }
-  if (comando == "Parar") {
-    transmitiendo = false;
-    sendWithChecksum("5:Transmisión detenida");
-    return;
-  }
-
-  int fin = comando.indexOf(':');
-  int codigo = (fin == -1) ? comando.toInt() : comando.substring(0, fin).toInt();
-  int inicio = (fin == -1) ? comando.length() : fin + 1;
-
-  switch(codigo) {
-    case 1: {
-      String param = comando.substring(inicio);
-      unsigned long nuevoSegs = param.toInt();
-      if (nuevoSegs >= 1 && nuevoSegs <= 3600) {
-        intervalo = nuevoSegs * 1000UL;
-        nextHT = millis() + intervalo;
-        sendWithChecksum("5:Periodo DHT cambiado");
-      } else sendWithChecksum("5:Periodo DHT inválido");
-      break;
-    }
-    case 2: {
-      int ang = comando.substring(inicio).toInt();
-      ang = constrain(ang, 0, 180);
-      servoMotor.write(ang);
-      anguloActual = ang;
-      modoBarrido = false;
-      sendWithChecksum("5:Servo en " + String(ang));
-      break;
-    }
-    case 3: transmitiendo = false; sendWithChecksum("5:Transmisión detenida"); break;
-    case 4: transmitiendo = true; nextHT = millis() + intervalo; sendWithChecksum("5:Transmisión reanudada"); break;
-    case 5: sendWithChecksum("5:OK"); break;
-    case 6: {
-      String modo = comando.substring(inicio);
-      modoBarrido = (modo == "1");
-      sendWithChecksum(modoBarrido ? "5:Barrido activado" : "5:Barrido detenido");
-      break;
-    }
-    case 7: {
-      unsigned long msval = comando.substring(inicio).toInt();
-      msval = constrain(msval, 50, 10000);
-      intervaloBarrido = msval;
-      sendWithChecksum("5:Intervalo ultrasonidos=" + String(intervaloBarrido));
-      break;
-    }
-    case 8: {
-      arduinoComputeAvg = (comando.substring(inicio) == "1");
-      sendWithChecksum(arduinoComputeAvg ? "5:Media en Arduino activada" : "5:Media en Arduino desactivada");
-      break;
-    }
-    case 9: {
-      int n = comando.substring(inicio).toInt();
-      n = constrain(n, 1, MAX_WINDOW);
-      windowN = n;
-      sendWithChecksum("5:WindowN=" + String(windowN));
-      break;
-    }
-    default: sendWithChecksum("5:Comando desconocido"); break;
-  }
+float computeAvg() {
+  int n = min(tempCount, windowN);
+  if (n == 0) return NAN;
+  float s = 0;
+  for (int i = tempCount - n; i < tempCount; i++) s += tempBuffer[i];
+  return s / n;
 }
 
-// ======================
-// SIMULACIÓN ORBITAL
-// ======================
-void simulate_orbit(unsigned long millisTime, double inclination = 0, int ecef = 0) {
-  double time = (millisTime / 1000.0) * TIME_COMPRESSION;
+// =====================================================
+// ÓRBITA
+// =====================================================
+void enviarOrbita(unsigned long ms) {
+  double time = (ms / 1000.0) * TIME_COMPRESSION;
   double angle = 2 * PI * (time / real_orbital_period);
+
   double x = r * cos(angle);
-  double y = r * sin(angle) * cos(inclination);
-  double z = r * sin(angle) * sin(inclination);
+  double y = r * sin(angle);
+  double z = 0;
 
-  if (ecef) {
-    double theta = EARTH_ROTATION_RATE * time;
-    double x_ecef = x * cos(theta) - y * sin(theta);
-    double y_ecef = x * sin(theta) + y * cos(theta);
-    x = x_ecef; y = y_ecef;
-  }
+  String msg = "4:" + String(time, 2) + ":" +
+               String(x, 2) + ":" +
+               String(y, 2) + ":" +
+               String(z, 2);
 
-  String msg = "Orbit | Time: " + String(time,2) +
-               " s | X: " + String(x,2) + " m, Y: " + String(y,2) + " m, Z: " + String(z,2);
-  sendWithChecksum(msg);
+  sendMsg(msg);
 }
 
-// --------------------
+// =====================================================
+// PROCESAR COMANDOS
+// =====================================================
+void procesarComando(String cmd) {
+  cmd.trim();
+  if (cmd.length() == 0) return;
+
+  // ---------- COMANDOS TEXTO ----------
+  if (cmd == "Iniciar") {
+    transmitiendo = true;
+    modoBarrido = true;
+    nextHT = nextServo = nextOrbit = millis();
+    sendMsg("5:INICIADO");
+    return;
+  }
+
+  if (cmd == "Parar") {
+    transmitiendo = false;
+    modoBarrido = false;
+    sendMsg("5:PARADO");
+    return;
+  }
+
+  // ---------- COMANDOS NUMÉRICOS ----------
+  int sep = cmd.indexOf(':');
+  int code = (sep < 0) ? cmd.toInt() : cmd.substring(0, sep).toInt();
+  String val = (sep < 0) ? "" : cmd.substring(sep + 1);
+
+  switch (code) {
+
+    case 1: { // intervalo DHT
+      int s = val.toInt();
+      if (s >= 1 && s <= 3600) {
+        intervaloHT = s * 1000UL;
+        nextHT = millis() + intervaloHT;
+        sendMsg("5:PERIODO_DHT=" + String(s));
+      }
+      break;
+    }
+
+    case 2: { // servo manual
+      angulo = constrain(val.toInt(), 0, 180);
+      servoMotor.write(angulo);
+      modoBarrido = false;
+      sendMsg("5:SERVO=" + String(angulo));
+      break;
+    }
+
+    case 3: { // detener transmisión
+      transmitiendo = false;
+      sendMsg("5:TX_OFF");
+      break;
+    }
+
+    case 4: { // reanudar transmisión
+      transmitiendo = true;
+      nextHT = nextServo = nextOrbit = millis();
+      sendMsg("5:TX_ON");
+      break;
+    }
+
+    case 6: { // barrido on/off
+      modoBarrido = (val == "1");
+      sendMsg(modoBarrido ? "5:BARRIDO_ON" : "5:BARRIDO_OFF");
+      break;
+    }
+
+    case 7: { // intervalo ultrasonidos
+      intervaloUltra = constrain(val.toInt(), 100, 10000);
+      sendMsg("5:ULTRA_MS=" + String(intervaloUltra));
+      break;
+    }
+
+    case 8: { // media en Arduino
+      arduinoComputeAvg = (val == "1");
+      sendMsg(arduinoComputeAvg ? "5:AVG_ON" : "5:AVG_OFF");
+      break;
+    }
+
+    case 9: { // ventana media
+      windowN = constrain(val.toInt(), 1, MAX_WINDOW);
+      sendMsg("5:WINDOW=" + String(windowN));
+      break;
+    }
+
+    default:
+      sendMsg("5:CMD_DESCONOCIDO");
+  }
+}
+
+// =====================================================
 // SETUP
-// --------------------
+// =====================================================
 void setup() {
-  pinMode(led1, OUTPUT);
-  pinMode(trigPin, OUTPUT);
-  pinMode(echoPin, INPUT);
-  servoMotor.attach(9);
-  anguloActual = 90;
-  servoMotor.write(anguloActual);
+  pinMode(TRIGPIN, OUTPUT);
+  pinMode(ECHOPIN, INPUT);
+  pinMode(MOTORPIN, OUTPUT);
+  pinMode(LEDRX, OUTPUT);
+
+  servoMotor.attach(SERVOPIN);
+  servoMotor.write(angulo);
+
   dht.begin();
   Serial.begin(9600);
   mySerial.begin(9600);
-  sendWithChecksum("5:Satélite listo");
 
-  // Setup órbita
   r = R_EARTH + ALTITUDE;
   real_orbital_period = 2 * PI * sqrt(pow(r, 3) / (G * M));
-  nextUpdateOrbit = millis() + MILLIS_BETWEEN_UPDATES;
+
+  sendMsg("5:SATELITE_LISTO");
 }
 
-// --------------------
+// =====================================================
 // LOOP
-// --------------------
+// =====================================================
 void loop() {
-  // 1) Procesar comandos
-  if (mySerial.available()) {
-    String comando = mySerial.readStringUntil('\n');
-    procesarComando(comando);
+
+  // 1️⃣ COMANDOS (SIEMPRE ACTIVOS)
+  while (mySerial.available()) {
+    String raw = mySerial.readStringUntil('\n');
+    String limpio = limpiarChecksum(raw);
+    procesarComando(limpio);
   }
 
-  // 2) Envío DHT
-  if (transmitiendo && (long)(millis() - nextHT) >= 0) {
-    nextHT = millis() + intervalo;
-    float h = dht.readHumidity();
+  if (!transmitiendo) return;
+
+  // 2️⃣ DHT
+  if (millis() >= nextHT) {
+    nextHT = millis() + intervaloHT;
+
     float t = dht.readTemperature();
-    if (isnan(h) || isnan(t)) {
-      if (!esperandoTimeout) { esperandoTimeout = true; nextTimeoutHT = millis() + 5000; }
-      if (esperandoTimeout && millis() >= nextTimeoutHT) { sendWithChecksum("3:"); esperandoTimeout = false; }
+    float h = dht.readHumidity();
+
+    if (isnan(t) || isnan(h)) {
+      sendMsg("3:");
     } else {
-      esperandoTimeout = false;
       pushTemp(t);
-      if (arduinoComputeAvg) {
-        float avg = computeAvgArduino();
-        String msg = "1:" + String(t,2) + ":" + String(h,2) + ":A:" + (isnan(avg) ? "nan" : String(avg,2));
-        sendWithChecksum(msg);
-      } else {
-        String msg = "1:" + String(t,2) + ":" + String(h,2);
-        sendWithChecksum(msg);
-      }
-      digitalWrite(led1,HIGH); delay(120); digitalWrite(led1,LOW);
+      String msg = "1:" + String(t, 2) + ":" + String(h, 2);
+      if (arduinoComputeAvg)
+        msg += ":A:" + String(computeAvg(), 2);
+      sendMsg(msg);
     }
   }
 
-  // 3) Barrido ultrasónico
-  if (transmitiendo) barridoUltrasonico();
+  // 3️⃣ SERVO + RADAR (SINCRONIZADOS)
+  if (modoBarrido && millis() >= nextServo) {
+    nextServo = millis() + intervaloServo;
 
-  // 4) Simulación orbital
-  if (millis() > nextUpdateOrbit) {
-    simulate_orbit(millis(), 0, 0);
-    nextUpdateOrbit = millis() + MILLIS_BETWEEN_UPDATES;
+    angulo += PASO * direccion;
+    if (angulo >= 180 || angulo <= 0) direccion *= -1;
+    servoMotor.write(angulo);
+
+    float d = medirDistancia();
+    if (d < 0) sendMsg("6:");
+    else sendMsg("2:" + String(angulo) + ":" + String(d, 2));
+  }
+
+  // 4️⃣ ÓRBITA
+  if (millis() >= nextOrbit) {
+    nextOrbit = millis() + intervaloOrbit;
+    enviarOrbita(millis());
   }
 }
+
