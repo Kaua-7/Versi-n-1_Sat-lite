@@ -9,14 +9,12 @@ import re
 import datetime
 from matplotlib.figure import Figure
 from mpl_toolkits.mplot3d import Axes3D
-import matplotlib.image as mpimg
-img = mpimg.imread(r"C:\Users\iroma\Desktop\computación\python\world.jpg")
 import os
 import numpy as np
 from tkinter import Toplevel, BOTH
 
 # =================== Configuración puerto ===================
-device = 'COM6'  # Cambia al puerto correcto
+device = 'COM5'  # Cambia al puerto correcto
 mySerial = serial.Serial(device, 9600, timeout=1)
 
 # =================== Variables de datos ===================
@@ -56,8 +54,8 @@ last_dht_accepted_ms = 0
 # =================== Variables órbita ===================
 x_orbit = []
 y_orbit = []
-z_orbit = []  # necesario para órbita 3D
-R_EARTH = 3.5e6  # Tierra más pequeña para que se vea la órbita
+z_orbit = []
+R_EARTH = 3.5e6
 
 regex_orbit = re.compile(
     r"Orbit \| Time: [\d\.]+ s \| X: ([\d\.-]+) m, Y: ([\d\.-]+) m, Z: ([\d\.-]+)"
@@ -83,11 +81,9 @@ window.geometry("1600x900")
 
 # =================== Figuras ===================
 fig = plt.figure(figsize=(12, 9))
-ax1 = fig.add_subplot(3, 1, 1)   # Temperatura
-ax2 = fig.add_subplot(3, 1, 2)   # Humedad
-ax3 = fig.add_subplot(3, 1, 3)   # Media móvil
-
-ax_radar = None   # el radar va en ventana aparte
+ax1 = fig.add_subplot(3, 1, 1)
+ax2 = fig.add_subplot(3, 1, 2)
+ax3 = fig.add_subplot(3, 1, 3)
 
 line_temp, = ax1.plot([], [], linestyle='-', marker=None, color='red', label="Temperatura")
 ax1.set_title("Temperatura (°C)"); ax1.grid(True); ax1.legend()
@@ -257,7 +253,7 @@ def abrir_visor_eventos():
 
 Button(controls_frame, text="Abrir Visor de Eventos", command=abrir_visor_eventos, width=18, bg="#C4243F",fg='white').grid(row=29, column=0, pady=(4,6))
 
-# =================== Ventana órbita 3D (Tierra texturizada realista) ===================
+# =================== Ventana órbita 3D (Tierra texturizada + órbita visible) ===================
 def abrir_sistema_orbital():
     ventana_orbital = Toplevel(window)
     ventana_orbital.title("Órbita Satélite 3D")
@@ -272,26 +268,21 @@ def abrir_sistema_orbital():
     ax_local.grid(True)
 
     from PIL import Image
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    # Usa una textura de Tierra de alta resolución en la misma carpeta
-    texture_path = os.path.join(script_dir, "earth_hd.jpg")
+    texture_path = r"C:\Users\kauav\Desktop\Versión 4\world.200412.3x5400x2700.jpg"
 
     img_texture = None
     try:
-        # Cargar imagen y normalizar
         earth_img = Image.open(texture_path)
-        earth_img = earth_img.resize((1024, 512))  # resolución suficiente para ver continentes
+        earth_img = earth_img.resize((1024, 512))
         img_texture = np.array(earth_img) / 255.0
-        if img_texture.shape[2] == 4:  # si hay canal alfa, quitarlo
+        if img_texture.shape[2] == 4:
             img_texture = img_texture[:, :, :3]
     except FileNotFoundError:
-        print("No se encontró 'earth_hd.jpg'. Usa una imagen equirectangular detallada en la carpeta del script.")
+        print("No se encontró la textura de la Tierra, se usará una esfera azul.")
         img_texture = None
 
-    # Esfera de la Tierra
     R_EARTH_3D = 3.5e6
-    n_lon = img_texture.shape[1] if img_texture is not None else 360
-    n_lat = img_texture.shape[0] if img_texture is not None else 180
+    n_lat, n_lon = 80, 160
 
     lon = np.linspace(-np.pi, np.pi, n_lon)
     lat = np.linspace(-np.pi/2, np.pi/2, n_lat)
@@ -302,23 +293,34 @@ def abrir_sistema_orbital():
     z_sphere = R_EARTH_3D * np.sin(lat)
 
     if img_texture is not None:
-        # Invertir eje vertical porque las imágenes suelen estar con latitud invertida
-        img_tex_flipped = np.flipud(img_texture)
+        tex_resized = Image.fromarray((img_texture*255).astype(np.uint8)).resize((n_lon, n_lat))
+        tex_resized = np.array(tex_resized) / 255.0
+        tex_resized = np.flipud(tex_resized)
         ax_local.plot_surface(
             x_sphere, y_sphere, z_sphere,
             rstride=1, cstride=1,
-            facecolors=img_tex_flipped,
-            linewidth=0, antialiased=False, shade=False
+            facecolors=tex_resized,
+            linewidth=0, antialiased=False, shade=False,
+            zorder=1
         )
     else:
         ax_local.plot_surface(
             x_sphere, y_sphere, z_sphere,
-            color='lightblue', linewidth=0, antialiased=True, shade=True
+            color='lightblue', linewidth=0, antialiased=True, shade=True,
+            zorder=1
         )
 
-    orbit_line, = ax_local.plot([], [], [], '-', linewidth=2, color='yellow', label='Órbita')
-    satellite_marker, = ax_local.plot([], [], [], 'o', markersize=8, color='red', label='Satélite')
+    orbit_line, = ax_local.plot([], [], [], '-', linewidth=2, color='yellow', label='Órbita', zorder=10)
+    satellite_marker, = ax_local.plot([], [], [], 'o', markersize=8, color='red', label='Satélite', zorder=11)
     ax_local.legend()
+
+    # Limites fijos alrededor de la Tierra para que la órbita entre SIEMPRE en cuadro
+    margin_factor = 1.5
+    lim = R_EARTH_3D * margin_factor
+    ax_local.set_xlim(-lim, lim)
+    ax_local.set_ylim(-lim, lim)
+    ax_local.set_zlim(-lim, lim)
+    ax_local.set_box_aspect([1, 1, 1])
 
     canvas_local = FigureCanvasTkAgg(fig_local, master=ventana_orbital)
     canvas_local.draw()
@@ -326,17 +328,16 @@ def abrir_sistema_orbital():
 
     def actualizar_local():
         if x_orbit and y_orbit and z_orbit:
-            orbit_line.set_data(x_orbit, y_orbit)
-            orbit_line.set_3d_properties(z_orbit)
-            satellite_marker.set_data(x_orbit[-1:], y_orbit[-1:])
-            satellite_marker.set_3d_properties(z_orbit[-1:])
+            # Inflar órbita para que quede por fuera del globo
+            factor = 1.05
+            xo = [factor * v for v in x_orbit]
+            yo = [factor * v for v in y_orbit]
+            zo = [factor * v for v in z_orbit]
 
-            all_vals = x_orbit + y_orbit + z_orbit
-            val_max = max(abs(min(all_vals)), abs(max(all_vals))) + 1e5
-            ax_local.set_xlim(-val_max, val_max)
-            ax_local.set_ylim(-val_max, val_max)
-            ax_local.set_zlim(-val_max, val_max)
-            ax_local.set_box_aspect([1,1,1])
+            orbit_line.set_data(xo, yo)
+            orbit_line.set_3d_properties(zo)
+            satellite_marker.set_data(xo[-1:], yo[-1:])
+            satellite_marker.set_3d_properties(zo[-1:])
 
         canvas_local.draw()
         ventana_orbital.after(500, actualizar_local)
@@ -484,7 +485,6 @@ def leer_serial():
             trozos = raw.split(':')
             now_ms = int(time.time()*1000)
 
-            # DHT
             if len(trozos) >= 3 and trozos[0] == '1':
                 intervalo_ms = max(0, int(intervaloDHTVar.get())) * 1000
                 if intervalo_ms == 0 or now_ms - last_dht_accepted_ms >= intervalo_ms:
@@ -516,7 +516,6 @@ def leer_serial():
                     else:
                         alerta_media_activa=False; alarma_media_label.config(text="Normal", bg="lightgreen")
 
-            # Radar / Servo
             elif len(trozos) >= 3 and trozos[0] == '2':
                 try:
                     ang = float(trozos[1])
@@ -534,7 +533,6 @@ def leer_serial():
                 except Exception as e:
                     registrar_evento("ERRORES", f"Radar inválido: {raw} ({e})")
 
-            # Órbita
             match = regex_orbit.search(raw)
             if match:
                 x_orbit.append(float(match.group(1)))
