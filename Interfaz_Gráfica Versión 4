@@ -403,7 +403,7 @@ def abrir_radar():
             offsets = np.column_stack([t, d])
             echo_scatter.set_offsets(offsets)
         else:
-            echo_scatter.set_offsets([])
+            echo_scatter.set_offsets(np.empty((0, 2)))
 
         canvas_r.draw()
         ventana_radar.after(40, actualizar_radar_local)
@@ -442,6 +442,9 @@ def leer_serial():
             if not raw:
                 continue
 
+            # DEBUG opcional:
+            # print("RAW:", raw)
+
             if raw.startswith("CHK:"):
                 try:
                     partes = raw.split(':')
@@ -462,6 +465,7 @@ def leer_serial():
             trozos = raw.split(':')
             now_ms = int(time.time()*1000)
 
+            # DHT
             if len(trozos) >= 3 and trozos[0] == '1':
                 intervalo_ms = max(0, int(intervaloDHTVar.get())) * 1000
                 if intervalo_ms == 0 or now_ms - last_dht_accepted_ms >= intervalo_ms:
@@ -493,6 +497,7 @@ def leer_serial():
                     else:
                         alerta_media_activa=False; alarma_media_label.config(text="Normal", bg="lightgreen")
 
+            # Radar / Servo
             elif len(trozos) >= 3 and trozos[0] == '2':
                 try:
                     ang = float(trozos[1])
@@ -510,6 +515,7 @@ def leer_serial():
                 except Exception as e:
                     registrar_evento("ERRORES", f"Radar inválido: {raw} ({e})")
 
+            # Órbita (texto tipo "Orbit | Time: ...")
             match = regex_orbit.search(raw)
             if match:
                 x_orbit.append(float(match.group(1)))
