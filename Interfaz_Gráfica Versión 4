@@ -14,7 +14,7 @@ import numpy as np
 from tkinter import Toplevel, BOTH
 
 # =================== Configuración puerto ===================
-device = 'COM5'  # Cambia al puerto correcto
+device = 'COM5'  
 mySerial = serial.Serial(device, 9600, timeout=1)
 
 # =================== Variables de datos ===================
@@ -45,7 +45,7 @@ lectura_activa = False
 
 radar_angulos = []
 radar_distancias = []
-RADAR_MAX_POINTS = 10
+RADAR_MAX_POINTS = 50
 last_angle_received = None
 modo_media = "python"
 
@@ -79,7 +79,7 @@ window = Tk()
 window.title("Ground Station - Radar + Gráficas + Órbita")
 window.geometry("1600x900")
 
-# =================== Figuras ===================
+# =================== Figuras principales (izquierda) ===================
 fig = plt.figure(figsize=(12, 9))
 ax1 = fig.add_subplot(3, 1, 1)
 ax2 = fig.add_subplot(3, 1, 2)
@@ -96,7 +96,7 @@ canvas = FigureCanvasTkAgg(fig, master=window)
 canvas.draw()
 canvas.get_tk_widget().grid(row=0, column=0, rowspan=20, padx=10, pady=10)
 
-# =================== Panel de controles ===================
+# =================== Panel de controles (arriba derecha) ===================
 controls_frame = Frame(window)
 controls_frame.grid(row=0, column=1, sticky=N, padx=12)
 
@@ -173,6 +173,11 @@ Button(controls_frame, text="Enviar ángulo", command=enviar_angulo, width=18, b
 
 Button(controls_frame, text="Activar Barrido", command=lambda: mySerial.write(b"6:1\n"), width=18, bg="#19BB0A", fg='white').grid(row=17,column=0,pady=3)
 Button(controls_frame, text="Detener Barrido", command=lambda: mySerial.write(b"6:0\n"), width=18, bg="#E50606", fg='white').grid(row=18,column=0,pady=3)
+
+Button(controls_frame, text="Iniciar", bg="#19BB0A", fg='white', command=lambda: IniciarClick(), width=18).grid(row=19,column=0,pady=(8,2))
+Button(controls_frame, text="Parar", bg="#E50606", fg='white', command=lambda: PararClick(), width=18).grid(row=20,column=0,pady=2)
+Button(controls_frame, text="Reanudar", bg="#EA7A12", fg='white', command=lambda: ReanudarClick(), width=18).grid(row=21,column=0,pady=2)
+Button(controls_frame, text="Reset (reactiva barrido)", bg="#EFE410", fg='white', command=lambda: ResetClick(), width=18).grid(row=22,column=0,pady=(6,2))
 
 Label(controls_frame, text="Estado alarma (medias):").grid(row=23, column=0, sticky=W, pady=(8,0))
 alarma_media_label = Label(controls_frame, text="NORMAL", bg="lightgreen",fg='black', width=18)
@@ -253,13 +258,22 @@ def abrir_visor_eventos():
 
 Button(controls_frame, text="Abrir Visor de Eventos", command=abrir_visor_eventos, width=18, bg="#C4243F",fg='white').grid(row=29, column=0, pady=(4,6))
 
-# =================== Ventana órbita 3D (Tierra texturizada + órbita visible) ===================
-def abrir_sistema_orbital():
-    ventana_orbital = Toplevel(window)
-    ventana_orbital.title("Órbita Satélite 3D")
-    ventana_orbital.geometry("700x700")
+# =================== Frames para radar y órbita incrustados ===================
+right_bottom_frame = Frame(window)
+right_bottom_frame.grid(row=1, column=1, sticky=N, padx=12, pady=(5,10))
 
-    fig_local = Figure(figsize=(6,6), dpi=100)
+radar_frame = Frame(right_bottom_frame)
+radar_frame.grid(row=0, column=0, padx=5, pady=5)
+
+orbit_frame = Frame(right_bottom_frame)
+orbit_frame.grid(row=0, column=1, padx=5, pady=5)
+
+# =================== Órbita incrustada ===================
+def abrir_sistema_orbital():
+    for widget in orbit_frame.winfo_children():
+        widget.destroy()
+
+    fig_local = Figure(figsize=(4,4), dpi=100)
     ax_local = fig_local.add_subplot(111, projection='3d')
     ax_local.set_title("Órbita Satélite 3D")
     ax_local.set_xlabel("X (m)")
@@ -282,7 +296,7 @@ def abrir_sistema_orbital():
         img_texture = None
 
     R_EARTH_3D = 3.5e6
-    n_lat, n_lon = 80, 160
+    n_lat, n_lon = 40, 80
 
     lon = np.linspace(-np.pi, np.pi, n_lon)
     lat = np.linspace(-np.pi/2, np.pi/2, n_lat)
@@ -293,7 +307,8 @@ def abrir_sistema_orbital():
     z_sphere = R_EARTH_3D * np.sin(lat)
 
     if img_texture is not None:
-        tex_resized = Image.fromarray((img_texture*255).astype(np.uint8)).resize((n_lon, n_lat))
+        from PIL import Image as PILImage
+        tex_resized = PILImage.fromarray((img_texture*255).astype(np.uint8)).resize((n_lon, n_lat))
         tex_resized = np.array(tex_resized) / 255.0
         tex_resized = np.flipud(tex_resized)
         ax_local.plot_surface(
@@ -311,10 +326,9 @@ def abrir_sistema_orbital():
         )
 
     orbit_line, = ax_local.plot([], [], [], '-', linewidth=2, color='yellow', label='Órbita', zorder=10)
-    satellite_marker, = ax_local.plot([], [], [], 'o', markersize=8, color='red', label='Satélite', zorder=11)
+    satellite_marker, = ax_local.plot([], [], [], 'o', markersize=6, color='red', label='Satélite', zorder=11)
     ax_local.legend()
 
-    # Limites fijos alrededor de la Tierra para que la órbita entre SIEMPRE en cuadro
     margin_factor = 1.5
     lim = R_EARTH_3D * margin_factor
     ax_local.set_xlim(-lim, lim)
@@ -322,13 +336,12 @@ def abrir_sistema_orbital():
     ax_local.set_zlim(-lim, lim)
     ax_local.set_box_aspect([1, 1, 1])
 
-    canvas_local = FigureCanvasTkAgg(fig_local, master=ventana_orbital)
+    canvas_local = FigureCanvasTkAgg(fig_local, master=orbit_frame)
     canvas_local.draw()
     canvas_local.get_tk_widget().pack(fill=BOTH, expand=True)
 
     def actualizar_local():
         if x_orbit and y_orbit and z_orbit:
-            # Inflar órbita para que quede por fuera del globo
             factor = 1.05
             xo = [factor * v for v in x_orbit]
             yo = [factor * v for v in y_orbit]
@@ -340,19 +353,18 @@ def abrir_sistema_orbital():
             satellite_marker.set_3d_properties(zo[-1:])
 
         canvas_local.draw()
-        ventana_orbital.after(500, actualizar_local)
+        window.after(500, actualizar_local)
 
     actualizar_local()
 
-Button(controls_frame, text="Abrir Sistema Orbital 3D", command=abrir_sistema_orbital, width=18, bg='#00aaff', fg='black').grid(row=30, column=0, pady=(4,6))
+Button(controls_frame, text="Mostrar Sistema Orbital 3D", command=abrir_sistema_orbital, width=18, bg='#00aaff', fg='black').grid(row=30, column=0, pady=(4,6))
 
-# =================== NUEVO RADAR ÉPICO ===================
+# =================== Radar incrustado con ecos que se difuminan ===================
 def abrir_radar():
-    ventana_radar = Toplevel(window)
-    ventana_radar.title("Radar Ultrasónico Épico")
-    ventana_radar.geometry("650x650")
+    for widget in radar_frame.winfo_children():
+        widget.destroy()
 
-    fig_radar = Figure(figsize=(6.2,6.2), dpi=100)
+    fig_radar = Figure(figsize=(4,4), dpi=100)
     ax_r = fig_radar.add_subplot(111, polar=True)
 
     fig_radar.patch.set_facecolor("black")
@@ -381,10 +393,11 @@ def abrir_radar():
     info_text = ax_r.text(0.5, 1.05, "", transform=ax_r.transAxes,
                           ha="center", va="bottom", color="white", fontsize=10)
 
-    canvas_r = FigureCanvasTkAgg(fig_radar, master=ventana_radar)
+    canvas_r = FigureCanvasTkAgg(fig_radar, master=radar_frame)
     canvas_r.draw()
     canvas_r.get_tk_widget().pack(fill=BOTH, expand=True)
 
+    # Barrido
     beam_line, = ax_r.plot([], [], color="#00ff80", linewidth=2)
 
     trail_length = 20
@@ -394,7 +407,9 @@ def abrir_radar():
         line, = ax_r.plot([], [], color="#00ff80", linewidth=1, alpha=alpha)
         trail_lines.append(line)
 
-    echo_scatter = ax_r.scatter([], [], s=40, c="#00ff00", alpha=0.9, edgecolors='none')
+    # Ecos que se difuminan: guardamos una lista de ecos con alpha
+    # cada eco: (theta, r, alpha)
+    ecos = []
 
     frame_counter = {"n": 0}
 
@@ -402,12 +417,14 @@ def abrir_radar():
         frame_counter["n"] += 1
         frame = frame_counter["n"]
 
+        # Ángulo de barrido (simulado si no hay datos)
         angle = (frame % 360) * math.pi / 180.0
 
         r = np.linspace(0, 400, 200)
         theta = np.full_like(r, angle)
         beam_line.set_data(theta, r)
 
+        # Desplazar la "estela" del haz
         prev_theta, prev_r = beam_line.get_data()
         last_theta, last_r = prev_theta, prev_r
         for line in trail_lines:
@@ -415,25 +432,43 @@ def abrir_radar():
             line.set_data(last_theta, last_r)
             last_theta, last_r = lt, lr
 
+        # Actualizar ecos con desvanecimiento
+        # Añadir nuevo eco si hay datos del radar
         if radar_angulos:
-            t = [math.radians(a) for a in radar_angulos]
-            d = radar_distancias
-            offsets = np.column_stack([t, d])
-            echo_scatter.set_offsets(offsets)
-
+            # último eco real
             ang_last = radar_angulos[-1]
             dist_last = radar_distancias[-1]
+            ecos.append([math.radians(ang_last), dist_last, 1.0])  # alpha inicial 1.0
+
             info_text.set_text(f"Ángulo: {ang_last:.1f}°   Distancia: {dist_last:.1f} cm")
         else:
-            echo_scatter.set_offsets(np.empty((0, 2)))
             info_text.set_text("Sin ecos")
 
+        # Reducir alpha de todos los ecos existentes
+        for e in ecos:
+            e[2] *= 0.92  # factor de desvanecimiento
+
+        # Eliminar ecos casi invisibles
+        ecos[:] = [e for e in ecos if e[2] > 0.05]
+
+        if ecos:
+            thetas = [e[0] for e in ecos]
+            dists  = [e[1] for e in ecos]
+            alphas = [e[2] for e in ecos]
+
+            # Crear colores RGBA con alpha diferente para cada eco
+            colors = [(0.0, 1.0, 0.0, a) for a in alphas]
+            ax_r.scatter(thetas, dists, s=40, c=colors, edgecolors='none')
+        # Para evitar que se acumulen demasiados artistas, limpia y redibuja:
+        # (alternativamente, se puede guardar el scatter y actualizar offsets+alpha
+        # usando colecciones avanzadas.)
+
         canvas_r.draw()
-        ventana_radar.after(20, actualizar_radar_local)
+        window.after(40, actualizar_radar_local)
 
     actualizar_radar_local()
 
-Button(controls_frame, text="Abrir Radar", command=abrir_radar, width=18, bg="#2CDF2C",fg='white').grid(row=31,column=0,pady=(4,6))
+Button(controls_frame, text="Mostrar Radar", command=abrir_radar, width=18, bg="#2CDF2C",fg='white').grid(row=31,column=0,pady=(4,6))
 
 # =================== Funciones graficado ===================
 def actualizar_graficas(force=False):
@@ -591,11 +626,6 @@ def ResetClick():
     except: pass
     actualizar_graficas(force=True)
 
-Button(controls_frame, text="Iniciar", bg="#19BB0A", fg='white', command=IniciarClick, width=18).grid(row=19,column=0,pady=(8,2))
-Button(controls_frame, text="Parar", bg="#E50606", fg='white', command=PararClick, width=18).grid(row=20,column=0,pady=2)
-Button(controls_frame, text="Reanudar", bg="#EA7A12", fg='white', command=ReanudarClick, width=18).grid(row=21,column=0,pady=2)
-Button(controls_frame, text="Reset (reactiva barrido)", bg="#EFE410", fg='white', command=ResetClick, width=18).grid(row=22,column=0,pady=(6,2))
-
 # =================== Cierre ===================
 def on_close():
     global lectura_activa
@@ -605,4 +635,9 @@ def on_close():
     window.destroy()
 
 window.protocol("WM_DELETE_WINDOW", on_close)
+
+# Opcional: inicializar radar y órbita al arrancar
+abrir_radar()
+abrir_sistema_orbital()
+
 window.mainloop()
