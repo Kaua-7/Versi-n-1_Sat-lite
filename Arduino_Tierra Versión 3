@@ -1,20 +1,18 @@
 // ==============================
-// 🌍 ESTACIÓN TIERRA - PUENTE LIMPIO
-// Reenvía CHK:... tal cual + alertas con prefijo BRIDGE:
+// 🌍 ESTACIÓN TIERRA - PUENTE LIMPIO v2
+// Reenvía CHK:... tal cual + alertas BRIDGE:
 // ==============================
 
 #include <SoftwareSerial.h>
 
 SoftwareSerial satSerial(10, 11); // RX, TX hacia satélite
 
-const int ledRx     = 12;  // LED parpadea al recibir datos
-const int ledAlerta = 13;  // LED alerta general
+const int ledRx     = 12;
+const int ledAlerta = 13;
 
-// ---------- TIMING ----------
 unsigned long ultimoMensaje = 0;
-const unsigned long TIMEOUT_COMUNICACION = 15000; // 15 s
+const unsigned long TIMEOUT_COMUNICACION = 15000;
 
-// ---------- ESTADOS DE ALERTA ----------
 bool alertaDHTActiva     = false;
 bool alertaUltraActiva   = false;
 bool alertaTimeoutActiva = false;
@@ -32,9 +30,7 @@ void setup() {
 
 void loop() {
 
-  // =================================
   // 1️⃣ RECEPCIÓN DESDE EL SATÉLITE
-  // =================================
   if (satSerial.available()) {
     String data = satSerial.readStringUntil('\n');
     data.trim();
@@ -42,28 +38,22 @@ void loop() {
 
     ultimoMensaje = millis();
 
-    // LED RX
     digitalWrite(ledRx, HIGH);
-    delay(30);
+    delay(20);
     digitalWrite(ledRx, LOW);
 
-    // ---- RECUPERACIÓN DE TIMEOUT ----
     if (alertaTimeoutActiva) {
       alertaTimeoutActiva = false;
       Serial.println("BRIDGE: ✅ Comunicación con satélite recuperada");
     }
 
-    // ---------- FALLO DHT ----------
     if (data.startsWith("3:")) {
       if (!alertaDHTActiva) {
         alertaDHTActiva = true;
         Serial.println("BRIDGE: ⚠️ Fallo sensor DHT");
       }
-      // Reenviamos también el mensaje original por si la GUI lo quiere ver
       Serial.println(data);
     }
-
-    // ---------- FALLO ULTRASONIDOS ----------
     else if (data.startsWith("6:")) {
       if (!alertaUltraActiva) {
         alertaUltraActiva = true;
@@ -71,30 +61,22 @@ void loop() {
       }
       Serial.println(data);
     }
-
-    // ---------- DATOS NORMALES (incluye CHK:... del satélite) ----------
     else {
-      // Recuperación DHT
       if (alertaDHTActiva) {
         alertaDHTActiva = false;
         Serial.println("BRIDGE: ✅ Sensor DHT recuperado");
       }
-
-      // Recuperación ultrasonidos
       if (alertaUltraActiva) {
         alertaUltraActiva = false;
         Serial.println("BRIDGE: ✅ Sensor ultrasonido recuperado");
       }
 
-      // MUY IMPORTANTE: reenviar TAL CUAL lo que manda el satélite
-      // Si el satélite ya genera CHK:..., no lo tocamos.
+      // Reenviar TAL CUAL lo que venga del satélite (incluye CHK:...)
       Serial.println(data);
     }
   }
 
-  // =================================
-  // 2️⃣ TIMEOUT DE COMUNICACIÓN
-  // =================================
+  // 2️⃣ TIMEOUT
   if (!alertaTimeoutActiva &&
       millis() - ultimoMensaje > TIMEOUT_COMUNICACION) {
 
@@ -102,23 +84,18 @@ void loop() {
     Serial.println("BRIDGE: ⚠️ Sin comunicación con el satélite");
   }
 
-  // =================================
-  // 3️⃣ LED DE ALERTA GLOBAL
-  // =================================
+  // 3️⃣ LED alerta global
   if (alertaDHTActiva || alertaUltraActiva || alertaTimeoutActiva) {
     digitalWrite(ledAlerta, HIGH);
   } else {
     digitalWrite(ledAlerta, LOW);
   }
 
-  // =================================
   // 4️⃣ COMANDOS DESDE PYTHON → SATÉLITE
-  // =================================
   if (Serial.available()) {
     String cmd = Serial.readStringUntil('\n');
     cmd.trim();
     if (cmd.length() > 0) {
-      // Se mandan al satélite tal cual Python los escribe (sin CHK:)
       satSerial.println(cmd);
     }
   }
