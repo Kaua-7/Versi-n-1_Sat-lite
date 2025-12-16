@@ -1,10 +1,20 @@
 // ==============================
-// 🌍 ESTACIÓN TIERRA - PUENTE LIMPIO v2 + AMENAZA
+// 🌍 ESTACIÓN TIERRA v3 - PUENTE + LCD AMENAZA
 // ==============================
 
 #include <SoftwareSerial.h>
+#include <LiquidCrystal.h>
+
+// Pines LCD en estación tierra
+#define LCD_RS 3
+#define LCD_E  4
+#define LCD_D4 5
+#define LCD_D5 6
+#define LCD_D6 7
+#define LCD_D7 8
 
 SoftwareSerial satSerial(10, 11); // RX, TX hacia satélite
+LiquidCrystal lcd(LCD_RS, LCD_E, LCD_D4, LCD_D5, LCD_D6, LCD_D7);
 
 const int ledRx     = 12;
 const int ledAlerta = 13;
@@ -15,7 +25,7 @@ const unsigned long TIMEOUT_COMUNICACION = 15000;
 bool alertaDHTActiva     = false;
 bool alertaUltraActiva   = false;
 bool alertaTimeoutActiva = false;
-bool alertaAmenazaActiva = false;   // NUEVO
+bool amenazaActiva       = false;  // ← LCD amenaza
 
 void setup() {
   pinMode(ledRx, OUTPUT);
@@ -24,90 +34,106 @@ void setup() {
   Serial.begin(9600);     // PC / Python
   satSerial.begin(9600);  // Satélite
 
+  // Inicializar LCD
+  lcd.begin(16, 2);
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("ESTACION TIERRA");
+  lcd.setCursor(0, 1);
+  lcd.print("Esperando sat...");
+
   Serial.println("BRIDGE: Estación de Tierra lista");
   ultimoMensaje = millis();
 }
 
 void loop() {
-
-  // 1️⃣ RECEPCIÓN DESDE EL SATÉLITE
+  // 1️⃣ RECEPCIÓN DESDE SATÉLITE
   if (satSerial.available()) {
     String data = satSerial.readStringUntil('\n');
     data.trim();
     if (!data.length()) return;
 
     ultimoMensaje = millis();
-
     digitalWrite(ledRx, HIGH);
     delay(20);
     digitalWrite(ledRx, LOW);
 
     if (alertaTimeoutActiva) {
       alertaTimeoutActiva = false;
-      Serial.println("BRIDGE: ✅ Comunicación con satélite recuperada");
+      Serial.println("BRIDGE: ✅ Comunicación recuperada");
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("SAT RECONECTADO");
     }
 
-    // ---- FALLO DHT ----
-    if (data.startsWith("3:")) {
+    // AMENAZA DESDE SATÉLITE → LCD LOCAL
+    if (data.indexOf("5:AMENAZA_ON") != -1) {
+      if (!amenazaActiva) {
+        amenazaActiva = true;
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("*** AMENAZA ***");
+        lcd.setCursor(0, 1);
+        lcd.print("Objeto <50cm");
+        Serial.println("BRIDGE: ⚠️ AMENAZA detectada");
+      }
+    } else if (data.indexOf("5:AMENAZA_OFF") != -1) {
+      if (amenazaActiva) {
+        amenazaActiva = false;
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("AREA SEGURA");
+        lcd.setCursor(0, 1);
+        lcd.print("Todo OK");
+        Serial.println("BRIDGE: ✅ Amenaza resuelta");
+      }
+    }
+    // Fallos sensores
+    else if (data.startsWith("3:")) {
       if (!alertaDHTActiva) {
         alertaDHTActiva = true;
-        Serial.println("BRIDGE: ⚠️ Fallo sensor DHT");
+        Serial.println("BRIDGE: ⚠️ Fallo DHT");
       }
       Serial.println(data);
     }
-    // ---- FALLO ULTRASONIDO ----
     else if (data.startsWith("6:")) {
       if (!alertaUltraActiva) {
         alertaUltraActiva = true;
-        Serial.println("BRIDGE: ⚠️ Fallo sensor ultrasonido");
+        Serial.println("BRIDGE: ⚠️ Fallo ultrasonido");
       }
       Serial.println(data);
     }
     else {
-      // ---- AMENAZA ON / OFF DESDE SATÉLITE ----
-      if (data.indexOf("5:AMENAZA_ON") != -1) {
-        if (!alertaAmenazaActiva) {
-          alertaAmenazaActiva = true;
-          Serial.println("BRIDGE: ⚠️ AMENAZA detectada");
-        }
-      } else if (data.indexOf("5:AMENAZA_OFF") != -1) {
-        if (alertaAmenazaActiva) {
-          alertaAmenazaActiva = false;
-          Serial.println("BRIDGE: ✅ Amenaza resuelta");
-        }
-      }
-
-      // Reset de alertas de sensores si llegan datos normales
-      if (alertaDHTActiva && !data.startsWith("3:")) {
+      // Reset alertas sensores
+      if (alertaDHTActiva) {
         alertaDHTActiva = false;
-        Serial.println("BRIDGE: ✅ Sensor DHT recuperado");
+        Serial.println("BRIDGE: ✅ DHT recuperado");
       }
-      if (alertaUltraActiva && !data.startsWith("6:")) {
+      if (alertaUltraActiva) {
         alertaUltraActiva = false;
-        Serial.println("BRIDGE: ✅ Sensor ultrasonido recuperado");
+        Serial.println("BRIDGE: ✅ Ultrasonido recuperado");
       }
-
-      // Reenviar TAL CUAL lo que venga del satélite (incluye CHK:...)
-      Serial.println(data);
+      Serial.println(data);  // Reenvía al PC
     }
   }
 
   // 2️⃣ TIMEOUT
-  if (!alertaTimeoutActiva &&
-      millis() - ultimoMensaje > TIMEOUT_COMUNICACION) {
-
+  if (!alertaTimeoutActiva && millis() - ultimoMensaje > TIMEOUT_COMUNICACION) {
     alertaTimeoutActiva = true;
-    Serial.println("BRIDGE: ⚠️ Sin comunicación con el satélite");
+    Serial.println("BRIDGE: ⚠️ Sin comunicación satélite");
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("SATELITE PERDIDO");
   }
 
-  // 3️⃣ LED alerta global (incluye amenaza)
-  if (alertaDHTActiva || alertaUltraActiva || alertaTimeoutActiva || alertaAmenazaActiva) {
+  // 3️⃣ LED alerta global
+  if (alertaDHTActiva || alertaUltraActiva || alertaTimeoutActiva || amenazaActiva) {
     digitalWrite(ledAlerta, HIGH);
   } else {
     digitalWrite(ledAlerta, LOW);
   }
 
-  // 4️⃣ COMANDOS DESDE PYTHON → SATÉLITE
+  // 4️⃣ COMANDOS PC → SATÉLITE
   if (Serial.available()) {
     String cmd = Serial.readStringUntil('\n');
     cmd.trim();
