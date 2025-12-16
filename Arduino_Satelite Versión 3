@@ -1,6 +1,6 @@
 // =====================================================
-// 🛰️ SATÉLITE v4.4 FINAL - SERVOMOTOR CORREGIDO
-// DHT + Ultrasonidos + Servo + Órbita + Checksum + LoRa
+// 🛰️ SATÉLITE v4.6 - Compatible GUI base
+// DHT + Ultrasonidos + Servo + Órbita + Checksum
 // =====================================================
 
 #include <SoftwareSerial.h>
@@ -17,43 +17,42 @@
 #define LEDRX 13
 
 // ------------------ OBJETOS ------------------
-SoftwareSerial mySerial(10, 11); // RX, TX hacia estación
+SoftwareSerial mySerial(10, 11); // RX, TX hacia estación (puente)
 DHT dht(DHTPIN, DHTTYPE);
 Servo servoMotor;
 
 // ------------------ ESTADO GLOBAL ------------------
 bool transmitiendo = false;
-bool modoBarrido = false;
+bool modoBarrido   = false;   // true = barrido automático, false = manual
 bool arduinoComputeAvg = false;
 
 // ------------------ TIEMPOS ------------------
-unsigned long intervaloHT = 5000;
-unsigned long nextHT = 0;
+unsigned long intervaloHT    = 5000;
+unsigned long nextHT         = 0;
 
-unsigned long intervaloServo = 1000;   // servo cada 1 s
-unsigned long nextServo = 0;
+unsigned long intervaloServo = 300;   // servo cada 0.3 s en barrido
+unsigned long nextServo      = 0;
 
-unsigned long intervaloUltra = 1000;   // radar ligado al servo
-
+unsigned long intervaloUltra = 300;   // mismo ritmo que el servo
 unsigned long intervaloOrbit = 3000;
-unsigned long nextOrbit = 0;
+unsigned long nextOrbit      = 0;
 
 // ------------------ SERVO ------------------
-int angulo = 0;
-int direccion = 1;
-const int PASO = 30;
+int angulo     = 90;   // posición inicial
+int direccion  = 1;
+const int PASO = 15;
 
 // ------------------ MEDIA TEMPERATURA ------------------
 #define MAX_WINDOW 100
 float tempBuffer[MAX_WINDOW];
-int tempCount = 0;
-int windowN = 10;
+int   tempCount = 0;
+int   windowN   = 10;
 
 // ------------------ ÓRBITA ------------------
-const double G = 6.67430e-11;
-const double M = 5.97219e24;
-const double R_EARTH = 6371000;
-const double ALTITUDE = 400000;
+const double G                = 6.67430e-11;
+const double M                = 5.97219e24;
+const double R_EARTH          = 6371000;
+const double ALTITUDE         = 400000;
 const double TIME_COMPRESSION = 90.0;
 
 double r;
@@ -76,14 +75,13 @@ void sendMsg(String msg) {
 }
 
 // =====================================================
-// LIMPIAR CHECKSUM ENTRANTE (CLAVE)
+// LIMPIAR CHECKSUM ENTRANTE
 // =====================================================
 String limpiarChecksum(String raw) {
   raw.trim();
   if (!raw.startsWith("CHK:")) return raw;
-
   raw = raw.substring(4);               // quitar "CHK:"
-  int lastColon = raw.lastIndexOf(':');  // quitar checksum
+  int lastColon = raw.lastIndexOf(':'); // quitar checksum final
   if (lastColon > 0) raw = raw.substring(0, lastColon);
   return raw;
 }
@@ -122,20 +120,20 @@ float computeAvg() {
 }
 
 // =====================================================
-// ÓRBITA
+// ÓRBITA (formato texto compatible con regex_orbit de tu GUI)
 // =====================================================
 void enviarOrbita(unsigned long ms) {
-  double time = (ms / 1000.0) * TIME_COMPRESSION;
+  double time  = (ms / 1000.0) * TIME_COMPRESSION;
   double angle = 2 * PI * (time / real_orbital_period);
 
   double x = r * cos(angle);
   double y = r * sin(angle);
   double z = 0;
 
-  String msg = "4:" + String(time, 2) + ":" +
-               String(x, 2) + ":" +
-               String(y, 2) + ":" +
-               String(z, 2);
+  String msg = "Orbit | Time: " + String(time, 2) +
+               " s | X: "  + String(x, 2) +
+               " m, Y: "   + String(y, 2) +
+               " m, Z: "   + String(z, 2);
 
   sendMsg(msg);
 }
@@ -150,7 +148,7 @@ void procesarComando(String cmd) {
   // ---------- COMANDOS TEXTO ----------
   if (cmd == "Iniciar") {
     transmitiendo = true;
-    modoBarrido = true;
+    modoBarrido  = true;                 // ← activar barrido al iniciar
     nextHT = nextServo = nextOrbit = millis();
     sendMsg("5:INICIADO");
     return;
@@ -158,13 +156,13 @@ void procesarComando(String cmd) {
 
   if (cmd == "Parar") {
     transmitiendo = false;
-    modoBarrido = false;
+    // NO tocamos modoBarrido: se mantiene el estado
     sendMsg("5:PARADO");
     return;
   }
 
   // ---------- COMANDOS NUMÉRICOS ----------
-  int sep = cmd.indexOf(':');
+  int sep  = cmd.indexOf(':');
   int code = (sep < 0) ? cmd.toInt() : cmd.substring(0, sep).toInt();
   String val = (sep < 0) ? "" : cmd.substring(sep + 1);
 
@@ -180,34 +178,21 @@ void procesarComando(String cmd) {
       break;
     }
 
-    case 2: { // servo manual
+    case 2: { // SERVO MANUAL
       angulo = constrain(val.toInt(), 0, 180);
-      modoBarrido = false; // Apaga el barrido
-      servoMotor.write(angulo); // Escribe inmediatamente
-      sendMsg("5:SERVO=" + String(angulo));
+      modoBarrido = false;        // pasa a modo manual
+      servoMotor.write(angulo);   // mueve de inmediato
+      sendMsg("5:SERVO_MANUAL=" + String(angulo));
       break;
     }
 
-    case 3: { // detener transmisión
-      transmitiendo = false;
-      sendMsg("5:TX_OFF");
-      break;
-    }
-
-    case 4: { // reanudar transmisión
-      transmitiendo = true;
-      nextHT = nextServo = nextOrbit = millis();
-      sendMsg("5:TX_ON");
-      break;
-    }
-
-    case 6: { // barrido on/off
+    case 6: { // BARRIDO ON/OFF
       modoBarrido = (val == "1");
       sendMsg(modoBarrido ? "5:BARRIDO_ON" : "5:BARRIDO_OFF");
       break;
     }
 
-    case 7: { // intervalo ultrasonidos
+    case 7: { // intervalo ultrasonidos (no se usa aún en lógica)
       intervaloUltra = constrain(val.toInt(), 100, 10000);
       sendMsg("5:ULTRA_MS=" + String(intervaloUltra));
       break;
@@ -243,8 +228,8 @@ void setup() {
   servoMotor.write(angulo);
 
   dht.begin();
-  Serial.begin(9600);
-  mySerial.begin(9600);
+  Serial.begin(9600);   // depuración local
+  mySerial.begin(9600); // hacia puente
 
   r = R_EARTH + ALTITUDE;
   real_orbital_period = 2 * PI * sqrt(pow(r, 3) / (G * M));
@@ -256,15 +241,20 @@ void setup() {
 // LOOP
 // =====================================================
 void loop() {
-
-  // 1️⃣ COMANDOS (SIEMPRE ACTIVOS)
+  // 1️⃣ COMANDOS
   while (mySerial.available()) {
-    String raw = mySerial.readStringUntil('\n');
+    String raw   = mySerial.readStringUntil('\n');
     String limpio = limpiarChecksum(raw);
     procesarComando(limpio);
   }
 
-  if (!transmitiendo) return;
+  // Aunque no se transmita, en manual mantenemos el ángulo
+  if (!transmitiendo) {
+    if (!modoBarrido) {
+      servoMotor.write(angulo);
+    }
+    return;
+  }
 
   // 2️⃣ DHT
   if (millis() >= nextHT) {
@@ -279,7 +269,7 @@ void loop() {
     sendMsg(msg);
   }
 
-  // 3️⃣ SERVO + RADAR (SINCRONIZADOS)
+  // 3️⃣ SERVO + RADAR
   if (modoBarrido) {
     if (millis() >= nextServo) {
       nextServo = millis() + intervaloServo;
@@ -289,12 +279,16 @@ void loop() {
       servoMotor.write(angulo);
 
       float d = medirDistancia();
-      if (d < 0) sendMsg("6:");
-      else sendMsg("2:" + String(angulo) + ":" + String(d, 2));
+      if (d < 0) {
+        sendMsg("6:");
+        Serial.println("DBG RADAR_FALLO");
+      } else {
+        String s = "2:" + String(angulo) + ":" + String(d, 2);
+        sendMsg(s);
+        Serial.print("DBG RADAR_OK "); Serial.println(s);
+      }
     }
-  }
-  else {
-    // Modo manual: escribe constantemente el ángulo actual
+  } else {
     servoMotor.write(angulo);
   }
 
