@@ -1,6 +1,5 @@
 // ==============================
-// 🌍 ESTACIÓN TIERRA - PUENTE LIMPIO v2
-// Reenvía CHK:... tal cual + alertas BRIDGE:
+// 🌍 ESTACIÓN TIERRA - PUENTE LIMPIO v2 + AMENAZA
 // ==============================
 
 #include <SoftwareSerial.h>
@@ -16,6 +15,7 @@ const unsigned long TIMEOUT_COMUNICACION = 15000;
 bool alertaDHTActiva     = false;
 bool alertaUltraActiva   = false;
 bool alertaTimeoutActiva = false;
+bool alertaAmenazaActiva = false;   // NUEVO
 
 void setup() {
   pinMode(ledRx, OUTPUT);
@@ -47,6 +47,7 @@ void loop() {
       Serial.println("BRIDGE: ✅ Comunicación con satélite recuperada");
     }
 
+    // ---- FALLO DHT ----
     if (data.startsWith("3:")) {
       if (!alertaDHTActiva) {
         alertaDHTActiva = true;
@@ -54,6 +55,7 @@ void loop() {
       }
       Serial.println(data);
     }
+    // ---- FALLO ULTRASONIDO ----
     else if (data.startsWith("6:")) {
       if (!alertaUltraActiva) {
         alertaUltraActiva = true;
@@ -62,11 +64,25 @@ void loop() {
       Serial.println(data);
     }
     else {
-      if (alertaDHTActiva) {
+      // ---- AMENAZA ON / OFF DESDE SATÉLITE ----
+      if (data.indexOf("5:AMENAZA_ON") != -1) {
+        if (!alertaAmenazaActiva) {
+          alertaAmenazaActiva = true;
+          Serial.println("BRIDGE: ⚠️ AMENAZA detectada");
+        }
+      } else if (data.indexOf("5:AMENAZA_OFF") != -1) {
+        if (alertaAmenazaActiva) {
+          alertaAmenazaActiva = false;
+          Serial.println("BRIDGE: ✅ Amenaza resuelta");
+        }
+      }
+
+      // Reset de alertas de sensores si llegan datos normales
+      if (alertaDHTActiva && !data.startsWith("3:")) {
         alertaDHTActiva = false;
         Serial.println("BRIDGE: ✅ Sensor DHT recuperado");
       }
-      if (alertaUltraActiva) {
+      if (alertaUltraActiva && !data.startsWith("6:")) {
         alertaUltraActiva = false;
         Serial.println("BRIDGE: ✅ Sensor ultrasonido recuperado");
       }
@@ -84,8 +100,8 @@ void loop() {
     Serial.println("BRIDGE: ⚠️ Sin comunicación con el satélite");
   }
 
-  // 3️⃣ LED alerta global
-  if (alertaDHTActiva || alertaUltraActiva || alertaTimeoutActiva) {
+  // 3️⃣ LED alerta global (incluye amenaza)
+  if (alertaDHTActiva || alertaUltraActiva || alertaTimeoutActiva || alertaAmenazaActiva) {
     digitalWrite(ledAlerta, HIGH);
   } else {
     digitalWrite(ledAlerta, LOW);
