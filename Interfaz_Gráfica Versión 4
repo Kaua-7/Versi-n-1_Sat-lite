@@ -20,8 +20,8 @@ import datetime
 import os
 
 # =================== CONFIG ===================
-device = 'COM5'  # Cambia al puerto correcto
-MAP_IMAGE_PATH = r"C:\Users\kauav\Desktop\Versión 4\world.200412.3x5400x2700.jpg"
+device = 'COM6'  # Cambia al puerto correcto
+MAP_IMAGE_PATH = r"C:\Users\iroma\Desktop\computación\python\earth_hd.jpg"
 
 mySerial = serial.Serial(device, 9600, timeout=1)
 
@@ -155,10 +155,10 @@ def add_fullscreen_header(frame, title_text):
     lbl = Label(header, text=title_text, bg=CARD_BG, fg=TEXT_FG,
                 font=("Segoe UI", 11, "bold"))
     lbl.grid(row=0, column=0, sticky="w", padx=6, pady=4)
-    btn_fs = Button(header, text="⤢", bg="#333333", fg=TEXT_FG, bd=0,
+    btn_fs = Button(header, text="□", bg="#878282", fg=TEXT_FG, bd=0,
                     command=lambda f=frame: enter_fullscreen(f))
     btn_fs.grid(row=0, column=1, sticky="e", padx=4)
-    btn_exit = Button(header, text="⤡", bg="#333333", fg=TEXT_FG, bd=0,
+    btn_exit = Button(header, text="-", bg="#878282", fg=TEXT_FG, bd=0,
                       command=exit_fullscreen)
     btn_exit.grid(row=0, column=2, sticky="e", padx=4)
 
@@ -171,11 +171,16 @@ content_graf.grid(row=1, column=0, sticky="nsew", padx=4, pady=4)
 content_graf.grid_rowconfigure(0, weight=1)
 content_graf.grid_columnconfigure(0, weight=1)
 
-fig = Figure(figsize=(5, 4), dpi=100)
+
+fig = Figure(figsize=(4.8, 3.8), dpi=100)
 gs = fig.add_gridspec(3, 1, height_ratios=[2.5, 1, 1])
 ax1 = fig.add_subplot(gs[0, 0])
 ax2 = fig.add_subplot(gs[1, 0])
 ax3 = fig.add_subplot(gs[2, 0])
+
+# Añadir esta línea:
+fig.subplots_adjust(hspace=0.5)  # prueba valores entre 0.4 y 0.7
+
 
 fig.patch.set_facecolor(CARD_BG)
 for ax in (ax1, ax2, ax3):
@@ -187,14 +192,14 @@ for ax in (ax1, ax2, ax3):
     ax.grid(color="#444444", alpha=0.6)
 
 line_temp, = ax1.plot([], [], linestyle='-', color='#ff6b6b', label="Temperatura")
-ax1.set_title("Temperatura (°C)")
-ax1.legend(facecolor="#222222", edgecolor="#444444")
+ax1.set_title("Temperatura (°C)", pad=10)
+
 line_hum, = ax2.plot([], [], linestyle='-', color='#4dabf7', label="Humedad")
-ax2.set_title("Humedad (%)")
-ax2.legend(facecolor="#222222", edgecolor="#444444")
+ax2.set_title("Humedad (%)", pad=10)
+
 line_avg, = ax3.plot([], [], linestyle='-', color='#51cf66', label="Media móvil")
-ax3.set_title("Media móvil")
-ax3.legend(facecolor="#222222", edgecolor="#444444")
+ax3.set_title("Media móvil", pad=10)
+
 
 canvas = FigureCanvasTkAgg(fig, master=content_graf)
 canvas.draw()
@@ -213,7 +218,7 @@ def abrir_radar():
     for w in radar_inner.winfo_children():
         w.destroy()
 
-    fig_radar = Figure(figsize=(5.5, 5.5), dpi=100)
+    fig_radar = Figure(figsize=(4, 4), dpi=100)
     ax_r = fig_radar.add_subplot(111, polar=True)
 
     fig_radar.patch.set_facecolor(CARD_BG)
@@ -315,6 +320,7 @@ def abrir_radar():
 abrir_radar()
 
 # =================== 3) Órbita: 3D + mapa ===================
+
 add_fullscreen_header(frame_orbita, "Órbita / Mapa mundi")
 
 orbita_inner = Frame(frame_orbita, bg=CARD_BG)
@@ -349,7 +355,7 @@ btn_toggle.grid(row=0, column=1, sticky="e", padx=40, pady=4)
 
 # --- ÓRBITA 3D ---
 def crear_orbita_3d():
-    fig_local = Figure(figsize=(4, 4), dpi=100)
+    fig_local = Figure(figsize=(10, 10), dpi=100)
     ax_local = fig_local.add_subplot(111, projection='3d')
 
     fig_local.patch.set_facecolor(CARD_BG)
@@ -376,6 +382,9 @@ def crear_orbita_3d():
     canvas_local = FigureCanvasTkAgg(fig_local, master=frame_orbit3d)
     canvas_local.draw()
     canvas_local.get_tk_widget().grid(row=0, column=0, sticky="nsew")
+    canvas_widget = canvas_local.get_tk_widget()
+    canvas_widget.place(relx=0.5, rely=0.5, anchor="center")
+
 
     last_len = {"n": 0}
 
@@ -423,7 +432,7 @@ def crear_orbita_3d():
 
 # --- MAPA MUNDI + SATÉLITE, USANDO DATOS REALES, PERO FORZANDO SENO ---
 def crear_orbita_mapa():
-    fig_map = Figure(figsize=(4, 4), dpi=100)
+    fig_map = Figure(figsize=(15, 15), dpi=100)
     ax_map = fig_map.add_subplot(111)
 
     fig_map.patch.set_facecolor(CARD_BG)
@@ -450,7 +459,11 @@ def crear_orbita_mapa():
 
     canvas_map = FigureCanvasTkAgg(fig_map, master=frame_orbitmap)
     canvas_map.draw()
-    canvas_map.get_tk_widget().grid(row=0, column=0, sticky="nsew")
+    canvas_widget = canvas_map.get_tk_widget()  # ✅ Cambia canvas_local por canvas_map
+    canvas_widget.grid(row=0, column=0, sticky="nsew")
+    canvas_widget.place(relx=0.5, rely=0.5, anchor="center")  # ✅ Ahora SÍ funciona
+
+
 
     def xyz_to_latlon_simple(x, y, z):
         r = math.sqrt(x * x + y * y + z * z)
