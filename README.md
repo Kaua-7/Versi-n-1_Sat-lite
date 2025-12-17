@@ -6,7 +6,7 @@ Repositorio con los códigos y recursos del **Proyecto del Grupo 9**, formado po
 
 ##  Estado del proyecto
 
-* **Última versión publicada:** verión 4
+* **Última versión publicada:** versión 4
   
 ---
 
