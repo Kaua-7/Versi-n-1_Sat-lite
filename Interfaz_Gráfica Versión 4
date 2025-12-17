@@ -1,6 +1,5 @@
 import matplotlib
-matplotlib.use("TkAgg")  # Backend de Matplotlib para integrarse con Tkinter
-
+matplotlib.use("TkAgg")
 import matplotlib.collections
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
@@ -9,8 +8,6 @@ from mpl_toolkits.mplot3d import Axes3D  # noqa
 
 from tkinter import *
 from tkinter import messagebox, Toplevel
-from tkinter import OptionMenu
-from PIL import Image, ImageTk
 import math
 import numpy as np
 import serial
@@ -20,17 +17,31 @@ import datetime
 import os
 
 # =================== CONFIG ===================
-device = 'COM6'  # Cambiar al puerto serie correcto según el equipo
+device = 'COM6'  # Cambia al puerto correcto
 MAP_IMAGE_PATH = r"C:\Users\kauav\Desktop\Versión 4\earth_hd.jpg"
 
-# Tamaños de figura para la órbita/mapa en modo normal y pantalla completa
 FIGSIZE_ORBIT_NORMAL = (6, 3.2)
 FIGSIZE_ORBIT_FULL   = (11, 6)
 
-# =================== Puerto serie y variables globales ===================
+DARK_BG   = "#050816"
+CARD_BG   = "#0b1020"
+CARD_ALT  = "#0f172a"
+TEXT_FG   = "#e5f2ff"
+ACCENT    = "#38bdf8"
+ACCENT_2  = "#a855f7"
+DANGER    = "#f97373"
+OK_COLOR  = "#22c55e"
 
+LABEL_FONT = ("Segoe UI", 9)
+ENTRY_FONT = ("Segoe UI", 9)
+BTN_FONT   = ("Segoe UI", 8, "bold")
+BTN_PADY   = 4
+BTN_WIDTH  = 14
+
+MAX_LOG_LINES = 400
+
+# =================== SERIE ===================
 class DummySerial:
-    """Clase de simulación del puerto serie si no se puede abrir el real."""
     def write(self, data):
         print("SERIAL SIM:", data.decode(errors="ignore").strip())
 
@@ -44,7 +55,6 @@ class DummySerial:
     def close(self):
         pass
 
-# Intentar abrir puerto serie real, y si falla, usar DummySerial
 try:
     mySerial = serial.Serial(device, 9600, timeout=1)
     print(f"Puerto serie {device} abierto correctamente")
@@ -53,589 +63,481 @@ except serial.SerialException as e:
     print("Usando puerto serie simulado (DummySerial).")
     mySerial = DummySerial()
 
-# =================== Variables de datos (temperatura/humedad) ===================
+# =================== VARIABLES GLOBALES ===================
 temperaturas = []
 humedades = []
 eje_x = []
 media_movil = []
 
-alerta_activa = False          # Para alertas por temperatura instantánea
-alerta_media_activa = False    # Para alertas basadas en la media móvil
-limite_temp = 30.0            # Límite de temperatura para disparar alertas
-ventana_default = 10          # Tamaño de ventana por defecto para media móvil
-i = 0                         # Índice para eje x (contador de muestras)
-lectura_activa = False        # Control de lectura continua desde el puerto serie
+alerta_activa = False
+alerta_media_activa = False
+limite_temp = 30.0
+ventana_default = 10
+i = 0
+lectura_activa = False
 
-# =================== Variables radar ===================
-radar_echoes = []             # Lista de ecos detectados por el radar
-RADAR_MAX_POINTS = 50         # Máximo número de ecos almacenados
-RADAR_MAX_AGE = 10            # “Edad” máxima de los ecos antes de borrarlos
-last_angle_received = None    # Último ángulo recibido desde el radar
+radar_echoes = []
+RADAR_MAX_POINTS = 50
+RADAR_MAX_AGE = 10
+last_angle_received = None
 
-# =================== Modo media y control DHT ===================
-modo_media = "python"         # "python" => media local, "arduino" => media calculada en Arduino
-last_dht_accepted_ms = 0      # Marca de tiempo de la última muestra DHT aceptada
+modo_media = "python"
+last_dht_accepted_ms = 0
 
-# =================== Variables órbita ===================
+# Órbita
 x_orbit = []
 y_orbit = []
 z_orbit = []
-R_EARTH = 3.5e6               # Radio de la Tierra para el dibujo en 3D
-MAX_ORBIT_POINTS = 2000       # Máximo de puntos de la órbita a almacenar
+R_EARTH = 3.5e6
+MAX_ORBIT_POINTS = 2000
 
-# Expresión regular para extraer datos de órbita desde el texto recibido por serie
 regex_orbit = re.compile(
     r"Orbit \| Time: [\d\.]+ s \| X: ([\d\.-]+) m, Y: ([\d\.-]+) m, Z: ([\d\.-]+)"
 )
 
-# =================== Registro de eventos ===================
+# Log
 LOG_FILE = "eventos.log"
+log_lines = []  # (timestamp, tipo, texto)
+log_filter_tipo = "TODOS"
 
 def registrar_evento(tipo, descripcion):
-    """Registra un evento en el archivo de log y lo muestra en consola."""
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    linea = f"{timestamp} | {tipo} | {descripcion}\n"
+    linea = f"{timestamp} | {tipo} | {descripcion}"
     try:
         with open(LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(linea)
+            f.write(linea + "\n")
     except Exception as e:
         print("Error escribiendo log:", e)
-    print("EVENTO:", linea.strip())
+    print("EVENTO:", linea)
+    log_lines.append((timestamp, tipo, descripcion))
+    if len(log_lines) > MAX_LOG_LINES:
+        del log_lines[0]
 
-def recalcular_media():
-    """Recalcula la serie completa de media móvil al cambiar la ventana."""
-    global media_movil
-    N = max(1, int(ventanaVar.get()))
-    nueva_media = []
-    for j in range(len(temperaturas)):
-        if j + 1 >= N:
-            ventana = temperaturas[j + 1 - N:j + 1]
-        else:
-            ventana = temperaturas[:j + 1]
-        nueva_media.append(sum(ventana) / len(ventana))
-    media_movil = nueva_media
-    actualizar_graficas(force=True)
+def filtrar_logs_por_tipo():
+    if log_filter_tipo == "TODOS":
+        return log_lines
+    return [l for l in log_lines if l[1] == log_filter_tipo]
 
-# =================== Ventana principal y layout general ===================
+def set_axes_equal(ax):
+    limits = np.array([ax.get_xlim3d(), ax.get_ylim3d(), ax.get_zlim3d()])
+    spans = limits[:, 1] - limits[:, 0]
+    centers = np.mean(limits, axis=1)
+    radius = 0.5 * max(spans)
+    ax.set_xlim3d([centers[0] - radius, centers[0] + radius])
+    ax.set_ylim3d([centers[1] - radius, centers[1] + radius])
+    ax.set_zlim3d([centers[2] - radius, centers[2] + radius])
+    ax.set_box_aspect([1, 1, 1])
 
+# =================== VENTANA PRINCIPAL ===================
 window = Tk()
 window.title("Ground Station - Radar + Gráficas + Órbita")
-window.state("zoomed")  # Maximizar ventana
-
-# Colores y estilos base
-DARK_BG = "#202124"
-CARD_BG = "#111111"
-TEXT_FG = "#f5f5f5"
-
+window.state("zoomed")
 window.configure(bg=DARK_BG)
 
-LABEL_FONT = ("Segoe UI", 11)
-ENTRY_FONT = ("Segoe UI", 11)
-
-# Rejilla principal: 2 filas, 2 columnas
 window.grid_rowconfigure(0, weight=3)
 window.grid_rowconfigure(1, weight=2)
 window.grid_columnconfigure(0, weight=1)
 window.grid_columnconfigure(1, weight=1)
 
-# Frames principales: mapa/órbita, radar y gráficas
-frame_mapa  = Frame(window, bg=CARD_BG, bd=2, relief="ridge")
-frame_radar = Frame(window, bg=CARD_BG, bd=2, relief="ridge")
-frame_graf  = Frame(window, bg=CARD_BG, bd=2, relief="ridge")
+frame_mapa  = Frame(window, bg=CARD_BG, bd=2, relief="ridge",
+                    highlightbackground=ACCENT, highlightcolor=ACCENT, highlightthickness=1)
+frame_radar = Frame(window, bg=CARD_BG, bd=2, relief="ridge",
+                    highlightbackground=ACCENT_2, highlightcolor=ACCENT_2, highlightthickness=1)
+frame_graf  = Frame(window, bg=CARD_BG, bd=2, relief="ridge",
+                    highlightbackground="#64748b", highlightcolor="#64748b", highlightthickness=1)
 
-frame_mapa.grid(row=0, column=0, columnspan=2, sticky="nsew", padx=8, pady=8)
-frame_radar.grid(row=1, column=0, sticky="nsew", padx=8, pady=8)
-frame_graf.grid(row=1, column=1, sticky="nsew", padx=8, pady=8)
+frame_mapa.grid(row=0, column=0, columnspan=2, sticky="nsew", padx=10, pady=10)
+frame_radar.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0,10))
+frame_graf.grid(row=1, column=1, sticky="nsew", padx=(0,10), pady=(0,10))
 
 for f in (frame_mapa, frame_radar, frame_graf):
     f.grid_rowconfigure(0, weight=0)
     f.grid_rowconfigure(1, weight=1)
     f.grid_columnconfigure(0, weight=1)
 
-# =================== Gestión de pantalla completa ===================
-
-fullscreen_state = {
-    "active": False,   # Indica si hay un frame en modo pantalla completa
-    "target": None,    # Frame que está en pantalla completa
-    "ctrl_frames": {}  # Diccionario frame_principal -> frame_controles_ocultables
-}
-
-def register_controls_frame(main_frame, ctrl_frame):
-    """Registra qué sub-frame de controles se debe mostrar/ocultar en fullscreen."""
-    fullscreen_state["ctrl_frames"][main_frame] = ctrl_frame
-
-def enter_fullscreen(target_frame):
-    """Pone un frame (mapa/radar/gráficas) en modo pantalla completa."""
-    if fullscreen_state["active"]:
-        return
-    fullscreen_state["active"] = True
-    fullscreen_state["target"] = target_frame
-
-    # Ocultar los frames principales
-    frame_mapa.grid_remove()
-    frame_radar.grid_remove()
-    frame_graf.grid_remove()
-
-    # Reconfigurar la rejilla para un único frame
-    for r in range(3):
-        window.grid_rowconfigure(r, weight=0)
-    for c in range(3):
-        window.grid_columnconfigure(c, weight=0)
-    window.grid_rowconfigure(0, weight=1)
-    window.grid_columnconfigure(0, weight=1)
-
-    target_frame.grid(row=0, column=0, sticky="nsew")
-
-    # En modo fullscreen del mapa se reconstruyen las figuras con tamaño grande
-    if target_frame is frame_mapa:
-        crear_orbita_3d()
-        crear_orbita_mapa()
-
-    # Mostrar panel de controles asociado (si existe)
-    ctrl = fullscreen_state["ctrl_frames"].get(target_frame)
-    if ctrl is not None:
-        ctrl.grid()
-
-def exit_fullscreen():
-    """Sale del modo pantalla completa y restaura el layout original."""
-    if not fullscreen_state["active"]:
-        return
-
-    target = fullscreen_state["target"]
-    ctrl = fullscreen_state["ctrl_frames"].get(target)
-    if ctrl is not None:
-        ctrl.grid_remove()
-
-    # Restaurar rejilla principal
-    frame_mapa.grid(row=0, column=0, columnspan=2, sticky="nsew", padx=8, pady=8)
-    frame_radar.grid(row=1, column=0, sticky="nsew", padx=8, pady=8)
-    frame_graf.grid(row=1, column=1, sticky="nsew", padx=8, pady=8)
-
-    for r in range(3):
-        window.grid_rowconfigure(r, weight=0)
-    for c in range(3):
-        window.grid_columnconfigure(c, weight=0)
-    window.grid_rowconfigure(0, weight=3)
-    window.grid_rowconfigure(1, weight=2)
-    window.grid_columnconfigure(0, weight=1)
-    window.grid_columnconfigure(1, weight=1)
-
-    # Volver a crear órbita/mapa con tamaño normal
-    crear_orbita_3d()
-    crear_orbita_mapa()
-
-    fullscreen_state["active"] = False
-    fullscreen_state["target"] = None
-
-def add_fullscreen_header(frame, title_text):
-    """
-    Añade una cabecera a cada frame principal con:
-    - título
-    - botón para entrar en fullscreen
-    - botón para salir de fullscreen
-    """
+def add_header(frame, title_text):
     header = Frame(frame, bg=CARD_BG, bd=0, highlightthickness=0)
     header.grid(row=0, column=0, sticky="ew")
     header.grid_columnconfigure(0, weight=1)
+    lbl = Label(header, text=title_text, bg=CARD_BG, fg=ACCENT,
+                font=("Segoe UI", 10, "bold"))
+    lbl.grid(row=0, column=0, sticky="w", padx=8, pady=3)
+    return header
 
-    lbl = Label(header, text=title_text, bg=CARD_BG, fg=TEXT_FG,
-                font=("Segoe UI", 11, "bold"))
-    lbl.grid(row=0, column=0, sticky="w", padx=6, pady=4)
+# ---------- MAPA / LOG / OBSERVACIONES ----------
+map_header = add_header(frame_mapa, "Módulo Órbita / Registro / Observaciones")
 
-    btn_fs = Button(header, text="□", bg="#878282", fg=TEXT_FG, bd=0,
-                    command=lambda f=frame: enter_fullscreen(f))
-    btn_fs.grid(row=0, column=1, sticky="e", padx=4)
+def abrir_manual():
+    texto = (
+        "MANUAL DE USO\n\n"
+        "- Iniciar: el satélite comienza a transmitir datos DHT, radar y órbita.\n"
+        "- Parar: detiene la transmisión, pero puedes seguir moviendo el servo.\n"
+        "- Barrido servo: activa/desactiva el barrido automático del servo en el satélite.\n"
+        "- Registro observación: escribe notas manuales en el log.\n"
+        "- Filtro: muestra solo ALERTA, OBSERVACION, INFO, COMANDOS o ERRORES.\n"
+    )
+    top = Toplevel(window)
+    top.title("Manual de la Ground Station")
+    top.configure(bg=CARD_BG)
+    top.geometry("600x500")
+    top.grid_rowconfigure(0, weight=1)
+    top.grid_columnconfigure(0, weight=1)
 
-    btn_exit = Button(header, text="-", bg="#878282", fg=TEXT_FG, bd=0,
-                      command=exit_fullscreen)
+    txt = Text(top, bg="#020617", fg=TEXT_FG, wrap="word",
+               font=("Segoe UI", 9))
+    txt.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
+    txt.insert("1.0", texto)
+    txt.config(state="disabled")
+
+    btn_cerrar = Button(top, text="Cerrar", command=top.destroy,
+                        bg=ACCENT, fg="#020617", relief="flat",
+                        font=BTN_FONT, width=10)
+    btn_cerrar.grid(row=1, column=0, pady=6)
+
+map_header.grid_columnconfigure(1, weight=0)
+map_header.grid_columnconfigure(2, weight=0)
+map_header.grid_columnconfigure(3, weight=0)
+map_header.grid_columnconfigure(4, weight=0)
+map_header.grid_columnconfigure(5, weight=0)
+
+btn_manual = Button(map_header, text="Manual", command=abrir_manual,
+                    bg=ACCENT_2, fg="#020617", relief="flat",
+                    font=BTN_FONT, width=9)
+btn_manual.grid(row=0, column=1, sticky="e", padx=(0, 4))
+
+def abrir_simulacion_orbital():
+    sim = Toplevel(window)
+    sim.title("Simulación Orbital (Datos reales)")
+    sim.configure(bg="SystemButtonFace")
+    sim.state("zoomed")
+
+    sim.grid_rowconfigure(0, weight=0)
+    sim.grid_rowconfigure(1, weight=1)
+    sim.grid_rowconfigure(2, weight=1)
+    sim.grid_columnconfigure(0, weight=1)
+
+    header = Frame(sim)
+    header.grid(row=0, column=0, sticky="ew")
+    header.grid_columnconfigure(0, weight=1)
+    Label(header, text="Simulación orbital 3D / Ground‑track (datos del satélite)",
+          font=("Segoe UI", 10, "bold")).grid(
+        row=0, column=0, sticky="w", padx=8, pady=3
+    )
+
+    orbit_mode = StringVar(value="3d")
+
+    def cerrar_sim():
+        sim.destroy()
+
+    def toggle_orbit_mode():
+        orbit_mode.set("map" if orbit_mode.get() == "3d" else "3d")
+        show_orbit_mode()
+
+    btn_toggle = Button(header, text="Vista 3D / Mapa",
+                        command=toggle_orbit_mode,
+                        font=("Segoe UI", 8))
+    btn_toggle.grid(row=0, column=1, sticky="e", padx=4)
+
+    btn_exit = Button(header, text="Salir",
+                      command=cerrar_sim,
+                      font=("Segoe UI", 8))
     btn_exit.grid(row=0, column=2, sticky="e", padx=4)
 
-# =================== 1) MAPA / ÓRBITA / EVENTOS ===================
+    main_frame = Frame(sim)
+    main_frame.grid(row=1, column=0, sticky="nsew", padx=8, pady=8)
+    main_frame.grid_rowconfigure(0, weight=1)
+    main_frame.grid_columnconfigure(0, weight=1)
 
-add_fullscreen_header(frame_mapa, "Órbita / Mapa mundi / Eventos")
+    container = Frame(main_frame)
+    container.grid(row=0, column=0, sticky="nsew")
+    container.grid_rowconfigure(0, weight=1)
+    container.grid_columnconfigure(0, weight=1)
 
-# Contenedor general dentro del frame de mapa
-map_outer = Frame(frame_mapa, bg=CARD_BG)
-map_outer.grid(row=1, column=0, sticky="nsew", padx=4, pady=4)
-map_outer.grid_rowconfigure(0, weight=3)  # parte superior: órbita
-map_outer.grid_rowconfigure(1, weight=1)  # parte inferior: eventos
-map_outer.grid_columnconfigure(0, weight=1)
+    frame_orbit3d = Frame(container)
+    frame_orbitmap = Frame(container)
 
-# Parte superior: órbita 3D / mapa 2D
-orbita_inner = Frame(map_outer, bg=CARD_BG)
-orbita_inner.grid(row=0, column=0, sticky="nsew")
-orbita_inner.grid_rowconfigure(0, weight=0)
-orbita_inner.grid_rowconfigure(1, weight=1)
-orbita_inner.grid_columnconfigure(0, weight=1)
+    log_frame_sim = Frame(sim, bg="#e5e7eb")
+    log_frame_sim.grid(row=2, column=0, sticky="nsew", padx=8, pady=(0, 8))
+    log_frame_sim.grid_rowconfigure(1, weight=1)
+    log_frame_sim.grid_columnconfigure(0, weight=1)
+    Label(log_frame_sim, text="Registro de eventos (simulación)",
+          bg="#e5e7eb", font=("Segoe UI", 9, "bold")).grid(
+        row=0, column=0, sticky="w", padx=4, pady=(2, 0)
+    )
+    txt_log_sim = Text(log_frame_sim, height=6, bg="white", fg="black",
+                       font=("Segoe UI", 8))
+    txt_log_sim.grid(row=1, column=0, sticky="nsew", padx=4, pady=4)
 
-# Variable para modo de visualización de órbita: "3d" o "map"
-orbit_mode = StringVar(value="3d")
+    def refrescar_log_sim():
+        txt_log_sim.delete("1.0", END)
+        for ts, tipo, desc in filtrar_logs_por_tipo()[-MAX_LOG_LINES:]:
+            txt_log_sim.insert(END, f"{ts} | {tipo} | {desc}\n")
+        sim.after(1000, refrescar_log_sim)
 
-# Frame contenedor de las dos vistas (3D y mapa)
-frame_orbit_container = Frame(orbita_inner, bg=CARD_BG)
-frame_orbit_container.grid(row=1, column=0, sticky="nsew")
-frame_orbit_container.grid_rowconfigure(0, weight=1)
-frame_orbit_container.grid_columnconfigure(0, weight=1)
+    refrescar_log_sim()
 
-frame_orbit3d = Frame(frame_orbit_container, bg=CARD_BG)   # Vista 3D
-frame_orbitmap = Frame(frame_orbit_container, bg=CARD_BG)  # Vista mapa 2D
+    def crear_orbita_3d():
+        for w in frame_orbit3d.winfo_children():
+            w.destroy()
 
-def show_orbit_mode():
-    """Muestra el frame de órbita 3D o el de mapa según orbit_mode."""
-    frame_orbit3d.place_forget()
-    frame_orbitmap.place_forget()
-    if orbit_mode.get() == "3d":
-        frame_orbit3d.place(relx=0.5, rely=0.5, anchor="center")
-    else:
-        frame_orbitmap.place(relx=0.5, rely=0.5, anchor="center")
+        fig_local = Figure(figsize=FIGSIZE_ORBIT_FULL, dpi=100)
+        ax_local = fig_local.add_subplot(111, projection='3d')
 
-def toggle_orbit_mode():
-    """Alterna entre vista 3D y vista mapa."""
-    orbit_mode.set("map" if orbit_mode.get() == "3d" else "3d")
+        ax_local.set_title("Órbita Satélite 3D")
+        ax_local.set_xlabel("X (m)")
+        ax_local.set_ylabel("Y (m)")
+        ax_local.set_zlabel("Z (m)")
+
+        R_EARTH_3D = R_EARTH
+        u = np.linspace(0, 2 * np.pi, 80)
+        v = np.linspace(0, np.pi, 40)
+        x_sphere = R_EARTH_3D * np.outer(np.cos(u), np.sin(v))
+        y_sphere = R_EARTH_3D * np.outer(np.sin(u), np.sin(v))
+        z_sphere = R_EARTH_3D * np.outer(np.ones_like(u), np.cos(v))
+        ax_local.plot_surface(x_sphere, y_sphere, z_sphere,
+                              cmap="Blues", edgecolor='none', alpha=0.9)
+
+        orbit_line, = ax_local.plot([], [], [], '-', linewidth=2, color="red", label='Órbita')
+        satellite_marker, = ax_local.plot([], [], [], 'o', markersize=5, color="green", label='Satélite')
+        ax_local.legend(fontsize=8)
+
+        set_axes_equal(ax_local)
+
+        frame_orbit3d.grid_rowconfigure(0, weight=1)
+        frame_orbit3d.grid_columnconfigure(0, weight=1)
+
+        canvas_local = FigureCanvasTkAgg(fig_local, master=frame_orbit3d)
+        canvas_local.draw()
+        canvas_local.get_tk_widget().grid(row=0, column=0, sticky="nsew")
+
+        last_len = {"n": 0}
+
+        def actualizar_local():
+            if len(x_orbit) != last_len["n"] and x_orbit and y_orbit and z_orbit:
+                last_len["n"] = len(x_orbit)
+
+                xo = np.array(x_orbit)
+                yo = np.array(y_orbit)
+                zo = np.array(z_orbit)
+
+                orbit_line.set_data(xo, yo)
+                orbit_line.set_3d_properties(zo)
+
+                satellite_marker.set_data(xo[-1:], yo[-1:])
+                satellite_marker.set_3d_properties(zo[-1:])
+
+                margin = 0.2
+                x_min, x_max = xo.min(), xo.max()
+                y_min, y_max = yo.min(), yo.max()
+                z_min, z_max = zo.min(), zo.max()
+
+                dx = x_max - x_min
+                dy = y_max - y_min
+                dz = z_max - z_min
+                max_range = max(dx, dy, dz) * (1 + margin)
+                if max_range == 0:
+                    max_range = R_EARTH_3D * 2.0
+
+                cx = (x_max + x_min) / 2.0
+                cy = (y_max + y_min) / 2.0
+                cz = (z_max + z_min) / 2.0
+
+                ax_local.set_xlim(cx - max_range / 2, cx + max_range / 2)
+                ax_local.set_ylim(cy - max_range / 2, cy + max_range / 2)
+                ax_local.set_zlim(cz - max_range / 2, cz + max_range / 2)
+
+                set_axes_equal(ax_local)
+                canvas_local.draw()
+
+            sim.after(800, actualizar_local)
+
+        actualizar_local()
+
+    def crear_orbita_mapa():
+        for w in frame_orbitmap.winfo_children():
+            w.destroy()
+
+        fig_map = Figure(figsize=FIGSIZE_ORBIT_FULL, dpi=100)
+        ax_map = fig_map.add_subplot(111)
+
+        ax_map.set_title("Ground track (real + forma sinusoidal)")
+        ax_map.set_xlabel("Longitud (°)")
+        ax_map.set_ylabel("Latitud (°)")
+
+        try:
+            img = plt.imread(MAP_IMAGE_PATH)
+        except Exception as e:
+            registrar_evento("ERRORES", f"No se pudo cargar mapa: {e}")
+            img = np.zeros((480, 960, 3), dtype=np.uint8)
+
+        ax_map.imshow(img, extent=[-180, 180, -90, 90],
+                      origin='upper', aspect='auto')
+        ax_map.set_xlim(-180, 180)
+        ax_map.set_ylim(-90, 90)
+
+        track_line, = ax_map.plot([], [], '-', color="red", linewidth=1.5, label="Trayectoria")
+        sat_point, = ax_map.plot([], [], 'o', markersize=5, color="green", label="Satélite")
+
+        ax_map.legend(fontsize=8)
+
+        frame_orbitmap.grid_rowconfigure(0, weight=1)
+        frame_orbitmap.grid_columnconfigure(0, weight=1)
+
+        canvas_map = FigureCanvasTkAgg(fig_map, master=frame_orbitmap)
+        canvas_map.draw()
+        canvas_map.get_tk_widget().grid(row=0, column=0, sticky="nsew")
+
+        def xyz_to_latlon_simple(x, y, z):
+            r = math.sqrt(x * x + y * y + z * z)
+            if r == 0:
+                return 0.0, 0.0
+            lat = math.degrees(math.asin(z / r))
+            lon = math.degrees(math.atan2(y, x))
+            lon = (lon + 180.0) % 360.0 - 180.0
+            return lat, lon
+
+        k = 2.0 * math.pi / 180.0
+        phase = 0.0
+        last_len = {"n": 0}
+
+        def actualizar_mapa():
+            if len(x_orbit) != last_len["n"] and x_orbit and y_orbit and z_orbit:
+                last_len["n"] = len(x_orbit)
+
+                lats_real = []
+                lons_real = []
+                for X, Y, Z in zip(x_orbit, y_orbit, z_orbit):
+                    lat_r, lon_r = xyz_to_latlon_simple(X, Y, Z)
+                    lats_real.append(lat_r)
+                    lons_real.append(lon_r)
+
+                if lats_real:
+                    N = min(500, len(lats_real))
+                    lat_slice = lats_real[-N:]
+                    amp = max(60.0, min(89.0, max(abs(v) for v in lat_slice)))
+                else:
+                    amp = 75.0
+
+                lats_forzadas = [amp * math.sin(k * lon_r + phase)
+                                 for lon_r in lons_real]
+
+                lons_plot = [lons_real[0]]
+                lats_plot = [lats_forzadas[0]]
+                for idx in range(1, len(lons_real)):
+                    lon_prev = lons_real[idx - 1]
+                    lon_cur = lons_real[idx]
+                    lat_cur = lats_forzadas[idx]
+                    if abs(lon_cur - lon_prev) > 180:
+                        lons_plot.append(float('nan'))
+                        lats_plot.append(float('nan'))
+                    lons_plot.append(lon_cur)
+                    lats_plot.append(lat_cur)
+
+                track_line.set_data(lons_plot, lats_plot)
+
+                lon_last = lons_real[-1]
+                lat_last = lats_forzadas[-1]
+                sat_point.set_data([lon_last], [lat_last])
+
+                canvas_map.draw()
+
+            sim.after(800, actualizar_mapa)
+
+        actualizar_mapa()
+
+    def show_orbit_mode():
+        frame_orbit3d.grid_forget()
+        frame_orbitmap.grid_forget()
+        if orbit_mode.get() == "3d":
+            frame_orbit3d.grid(row=0, column=0, sticky="nsew")
+        else:
+            frame_orbitmap.grid(row=0, column=0, sticky="nsew")
+
+    crear_orbita_3d()
+    crear_orbita_mapa()
     show_orbit_mode()
 
-# Botón para alternar modo de órbita
-btn_toggle = Button(orbita_inner, text="Modo: 3D / Mapa",
-                    bg="#333333", fg=TEXT_FG, bd=0,
-                    command=toggle_orbit_mode)
-btn_toggle.grid(row=0, column=0, sticky="e", padx=10, pady=4)
+btn_sim = Button(map_header,
+                 text="Simulación",
+                 bg="#020617", fg=ACCENT, relief="ridge", bd=1,
+                 activebackground="#020617", activeforeground=ACCENT,
+                 font=BTN_FONT, width=9,
+                 command=abrir_simulacion_orbital)
+btn_sim.grid(row=0, column=2, sticky="e", padx=(0, 4))
 
-# ----- Panel de eventos y observaciones -----
-eventos_inner = Frame(map_outer, bg="black")
-eventos_inner.grid(row=1, column=0, sticky="nsew", padx=4, pady=(8, 0))
-
-for r in range(6):
-    eventos_inner.grid_rowconfigure(r, weight=0)
-eventos_inner.grid_rowconfigure(5, weight=1)
-eventos_inner.grid_columnconfigure(0, weight=1)
-
-BTN_FONT = ("Segoe UI", 11, "bold")
-BTN_WIDTH = 18
-BTN_PADY = 6
-
-Label(eventos_inner, text="Eventos y observaciones",
-      bg="black", fg=TEXT_FG, font=("Segoe UI", 13, "bold")).grid(
-    row=0, column=0, sticky="w", pady=(0, 8), padx=4
+# Observaciones: label nuevo + entry + botón
+Label(map_header, text="Observaciones:",
+      bg=CARD_BG, fg=TEXT_FG, font=("Segoe UI", 8)).grid(
+    row=1, column=0, sticky="w", padx=8, pady=(2, 1)
 )
-
-Label(eventos_inner, text="Registrar observación:",
-      bg="black", fg=TEXT_FG, font=("Segoe UI", 11)).grid(
-    row=1, column=0, sticky="w", pady=(4, 2), padx=4
-)
-
-# Campo de texto para observación manual
-observacionVar = StringVar()
-Entry(eventos_inner, textvariable=observacionVar,
-      bg="#2b2b2b", fg=TEXT_FG, insertbackground=TEXT_FG,
-      relief="flat", font=("Segoe UI", 11)).grid(
-    row=2, column=0, sticky="ew", padx=4, pady=(0, 4)
-)
+obs_entry = Entry(map_header, width=32,
+                  bg="#020617", fg=TEXT_FG, insertbackground=TEXT_FG,
+                  relief="flat", font=("Segoe UI", 8))
+obs_entry.grid(row=1, column=1, columnspan=2, sticky="w", padx=(0, 4), pady=(2, 4))
 
 def registrar_observacion():
-    """Guarda una observación manual en el log."""
-    obs = observacionVar.get().strip()
-    if obs:
-        registrar_evento("OBSERVACION", obs)
-        messagebox.showinfo("Observación registrada", "Se ha guardado la observación en el log.")
-        observacionVar.set("")
-    else:
-        messagebox.showwarning("Campo vacío", "Ingrese una observación antes de registrar.")
-
-def abrir_visor_eventos():
-    """Abre una ventana con el contenido del log y filtros básicos."""
-    try:
-        with open(LOG_FILE, "r", encoding="utf-8") as f:
-            lineas = f.readlines()
-    except FileNotFoundError:
-        messagebox.showwarning("Aviso", "No hay log de eventos todavía.")
+    texto = obs_entry.get().strip()
+    if not texto:
         return
+    registrar_evento("OBSERVACION", texto)
+    obs_entry.delete(0, END)
 
-    visor = Toplevel(window)
-    visor.title("Visor de Eventos")
-    visor.geometry("800x600")
+btn_obs = Button(map_header, text="Registrar",
+                 command=registrar_observacion,
+                 bg="#4ade80", fg="#020617", relief="flat",
+                 font=("Segoe UI", 8, "bold"), width=9)
+btn_obs.grid(row=1, column=3, sticky="e", padx=(0, 4), pady=(2, 4))
 
-    # Frame de filtros
-    filtro_frame = Frame(visor)
-    filtro_frame.pack(side=TOP, fill="x", padx=5, pady=5)
-
-    Label(filtro_frame, text="Filtrar por tipo:").pack(side=LEFT)
-    tipo_var = StringVar(value="TODOS")
-    tipos_eventos = ["TODOS", "ERRORES", "COMANDOS", "INFO SATELITE"]
-    tipo_menu = OptionMenu(filtro_frame, tipo_var, *tipos_eventos)
-    tipo_menu.pack(side=LEFT, padx=(5, 15))
-
-    Label(filtro_frame, text="Buscar texto:").pack(side=LEFT)
-    texto_buscar_var = StringVar()
-    Entry(filtro_frame, textvariable=texto_buscar_var, width=20).pack(side=LEFT, padx=(5, 15))
-
-    # Área de texto con scrollbar
-    text_frame = Frame(visor)
-    text_frame.pack(fill="both", expand=True, padx=5, pady=5)
-    scrollbar = Scrollbar(text_frame)
-    scrollbar.pack(side=RIGHT, fill="y")
-    text_area = Text(text_frame, wrap="none", yscrollcommand=scrollbar.set)
-    text_area.pack(fill="both", expand=True)
-    scrollbar.config(command=text_area.yview)
-
-    def actualizar_texto():
-        """Aplica filtros al log y actualiza el área de texto."""
-        text_area.delete(1.0, END)
-        tipo_filtro = tipo_var.get()
-        buscar_texto = texto_buscar_var.get().strip().lower()
-        for linea in lineas:
-            mostrar = False
-            if tipo_filtro == "TODOS":
-                mostrar = True
-            elif tipo_filtro == "ERRORES" and ("fallo" in linea.lower() or "error" in linea.lower()):
-                mostrar = True
-            elif tipo_filtro == "COMANDOS" and "COMANDOS" in linea:
-                mostrar = True
-            elif tipo_filtro == "INFO SATELITE" and ("satélite msg:" in linea.lower() or "otro mensaje:" in linea.lower()):
-                mostrar = True
-            if buscar_texto and buscar_texto not in linea.lower():
-                mostrar = False
-            if mostrar:
-                text_area.insert(END, linea)
-                text_area.see(END)
-
-    Button(filtro_frame, text="Actualizar", command=actualizar_texto).pack(side=RIGHT)
-    actualizar_texto()
-
-Button(eventos_inner, text="Registrar observación", command=registrar_observacion,
-       bg="#3b4252", fg="#eceff4", relief="flat",
-       font=BTN_FONT, width=BTN_WIDTH).grid(
-    row=3, column=0, pady=BTN_PADY, padx=4, sticky="w"
+# Filtro tipo log
+Label(map_header, text="Filtro:",
+      bg=CARD_BG, fg=TEXT_FG, font=("Segoe UI", 8)).grid(
+    row=0, column=3, sticky="e", padx=(8, 2)
 )
+filtro_var = StringVar(value="TODOS")
+filtro_opts = ["TODOS", "ALERTA", "OBSERVACION", "INFO SATELITE", "COMANDOS", "ERRORES"]
+om_filtro = OptionMenu(map_header, filtro_var, *filtro_opts)
+om_filtro.config(bg="#020617", fg=TEXT_FG, highlightthickness=0,
+                 activebackground="#020617", activeforeground=TEXT_FG,
+                 font=("Segoe UI", 8))
+om_filtro["menu"].config(bg="#020617", fg=TEXT_FG, font=("Segoe UI", 8))
+om_filtro.grid(row=0, column=4, sticky="e", padx=(2, 8))
 
-Button(eventos_inner, text="Abrir Visor de Eventos", command=abrir_visor_eventos,
-       bg="#C4243F", fg='white', relief="flat",
-       font=BTN_FONT, width=BTN_WIDTH).grid(
-    row=4, column=0, pady=BTN_PADY, padx=4, sticky="w"
+def cambiar_filtro(*args):
+    global log_filter_tipo
+    log_filter_tipo = filtro_var.get()
+    refrescar_log()
+
+filtro_var.trace_add("write", cambiar_filtro)
+
+# Log principal
+map_outer = Frame(frame_mapa, bg=CARD_BG)
+map_outer.grid(row=1, column=0, sticky="nsew", padx=4, pady=4)
+map_outer.grid_rowconfigure(0, weight=1)
+map_outer.grid_columnconfigure(0, weight=1)
+
+log_frame = Frame(map_outer, bg=CARD_BG)
+log_frame.grid(row=0, column=0, sticky="nsew")
+log_frame.grid_rowconfigure(1, weight=1)
+log_frame.grid_columnconfigure(0, weight=1)
+
+Label(log_frame, text="Registro de eventos (filtrado)",
+      bg=CARD_BG, fg=TEXT_FG, font=("Segoe UI", 9, "bold")).grid(
+    row=0, column=0, sticky="w", padx=6, pady=(2, 0)
 )
+txt_log = Text(log_frame, bg="#020617", fg="#e5e7eb",
+               font=("Segoe UI", 8))
+txt_log.grid(row=1, column=0, sticky="nsew", padx=6, pady=4)
 
-# Registrar este panel como panel de controles asociado al frame del mapa
-register_controls_frame(frame_mapa, eventos_inner)
-eventos_inner.grid_remove()  # Ocultarlo por defecto (solo en fullscreen)
+def refrescar_log():
+    txt_log.delete("1.0", END)
+    for ts, tipo, desc in filtrar_logs_por_tipo()[-MAX_LOG_LINES:]:
+        txt_log.insert(END, f"{ts} | {tipo} | {desc}\n")
+    window.after(1000, refrescar_log)
 
-# ----- Órbita 3D -----
-def crear_orbita_3d():
-    """
-    Crea o recrea la figura 3D de la órbita dentro de frame_orbit3d.
-    Ajusta el tamaño según si está en fullscreen o no.
-    """
-    if fullscreen_state["active"] and fullscreen_state["target"] is frame_mapa:
-        fs = FIGSIZE_ORBIT_FULL
-    else:
-        fs = FIGSIZE_ORBIT_NORMAL
+refrescar_log()
 
-    # Limpia cualquier contenido previo del frame
-    for w in frame_orbit3d.winfo_children():
-        w.destroy()
-
-    fig_local = Figure(figsize=fs, dpi=100)
-    ax_local = fig_local.add_subplot(111, projection='3d')
-
-    # Estética de la figura
-    fig_local.patch.set_facecolor(CARD_BG)
-    ax_local.set_facecolor("#000000")
-    ax_local.set_title("Órbita Satélite 3D", color=TEXT_FG)
-    ax_local.set_xlabel("X (m)", color=TEXT_FG)
-    ax_local.set_ylabel("Y (m)", color=TEXT_FG)
-    ax_local.set_zlabel("Z (m)", color=TEXT_FG)
-    ax_local.tick_params(colors=TEXT_FG)
-
-    # Dibujar esfera que representa la Tierra
-    R_EARTH_3D = R_EARTH
-    u = np.linspace(0, 2 * np.pi, 40)
-    v = np.linspace(0, np.pi, 20)
-    x_sphere = R_EARTH_3D * np.outer(np.cos(u), np.sin(v))
-    y_sphere = R_EARTH_3D * np.outer(np.sin(u), np.sin(v))
-    z_sphere = R_EARTH_3D * np.outer(np.ones_like(u), np.cos(v))
-    ax_local.plot_surface(x_sphere, y_sphere, z_sphere, color='#1e90ff',
-                          edgecolor='none', alpha=0.9)
-
-    # Curva de órbita y marcador del satélite
-    orbit_line, = ax_local.plot([], [], [], '-', linewidth=2, color='yellow', label='Órbita')
-    satellite_marker, = ax_local.plot([], [], [], 'o', markersize=6, color='red', label='Satélite')
-    ax_local.legend(facecolor="#111111", edgecolor="#444444", labelcolor=TEXT_FG)
-
-    # Integrar figura en Tkinter
-    canvas_local = FigureCanvasTkAgg(fig_local, master=frame_orbit3d)
-    canvas_local.draw()
-    canvas_local.get_tk_widget().pack(expand=True, fill="both")
-
-    last_len = {"n": 0}  # Para detectar cuando hay nuevos puntos
-
-    def actualizar_local():
-        """
-        Actualiza periódicamente la órbita dibujada con los datos de x_orbit, y_orbit, z_orbit.
-        """
-        if len(x_orbit) != last_len["n"] and x_orbit and y_orbit and z_orbit:
-            last_len["n"] = len(x_orbit)
-
-            xo = np.array(x_orbit)
-            yo = np.array(y_orbit)
-            zo = np.array(z_orbit)
-
-            orbit_line.set_data(xo, yo)
-            orbit_line.set_3d_properties(zo)
-
-            # Marcador en la última posición
-            satellite_marker.set_data(xo[-1:], yo[-1:])
-            satellite_marker.set_3d_properties(zo[-1:])
-
-            # Ajuste automático de límites para encuadrar la órbita
-            margin = 0.1
-            x_min, x_max = xo.min(), xo.max()
-            y_min, y_max = yo.min(), yo.max()
-            z_min, z_max = zo.min(), zo.max()
-
-            dx = x_max - x_min
-            dy = y_max - y_min
-            dz = z_max - z_min
-            max_range = max(dx, dy, dz) * (1 + margin)
-            if max_range == 0:
-                max_range = R_EARTH_3D * 0.5
-
-            cx = (x_max + x_min) / 2.0
-            cy = (y_max + y_min) / 2.0
-            cz = (z_max + z_min) / 2.0
-
-            ax_local.set_xlim(cx - max_range / 2, cx + max_range / 2)
-            ax_local.set_ylim(cy - max_range / 2, cy + max_range / 2)
-            ax_local.set_zlim(cz - max_range / 2, cz + max_range / 2)
-            ax_local.set_box_aspect([1, 1, 1])
-
-            canvas_local.draw()
-
-        window.after(800, actualizar_local)
-
-    actualizar_local()
-
-# ----- Mapa 2D: imagen completa sin recortes -----
-def crear_orbita_mapa():
-    """
-    Crea o recrea el mapa 2D con la traza de la órbita proyectada en lat/lon.
-    La imagen se muestra siempre completa, sin zoom dinámico.
-    """
-    if fullscreen_state["active"] and fullscreen_state["target"] is frame_mapa:
-        fs = FIGSIZE_ORBIT_FULL
-    else:
-        fs = FIGSIZE_ORBIT_NORMAL
-
-    for w in frame_orbitmap.winfo_children():
-        w.destroy()
-
-    fig_map = Figure(figsize=fs, dpi=100)
-    ax_map = fig_map.add_subplot(111)
-
-    fig_map.patch.set_facecolor(CARD_BG)
-    ax_map.set_facecolor("#000000")
-    ax_map.set_title("Ground track (real + forma sinusoidal)", color=TEXT_FG)
-    ax_map.tick_params(colors=TEXT_FG)
-    for spine in ax_map.spines.values():
-        spine.set_color(TEXT_FG)
-
-    # Cargar imagen de mapa. Si falla, usar un mapa negro.
-    try:
-        img = plt.imread(MAP_IMAGE_PATH)
-    except Exception as e:
-        registrar_evento("ERRORES", f"No se pudo cargar mapa: {e}")
-        img = np.zeros((480, 960, 3), dtype=np.uint8)
-
-    # Mostrar siempre la imagen completa, mapeada de -180..180 en lon, -90..90 en lat
-    ax_map.imshow(img, extent=[-180, 180, -90, 90],
-                  origin='upper', aspect='auto')
-
-    # Fijar límites del gráfico exactamente al mapa
-    ax_map.set_xlim(-180, 180)
-    ax_map.set_ylim(-90, 90)
-
-    track_line, = ax_map.plot([], [], '-', color='yellow', linewidth=1.5, label="Trayectoria")
-    sat_point, = ax_map.plot([], [], 'ro', markersize=6, label="Satélite")
-
-    ax_map.legend(facecolor="#111111", edgecolor="#444444", labelcolor=TEXT_FG)
-
-    canvas_map = FigureCanvasTkAgg(fig_map, master=frame_orbitmap)
-    canvas_map.draw()
-    canvas_map.get_tk_widget().pack(expand=True, fill="both")
-
-    def xyz_to_latlon_simple(x, y, z):
-        """Convierte coordenadas cartesianas (x,y,z) a latitud y longitud aproximadas."""
-        r = math.sqrt(x * x + y * y + z * z)
-        if r == 0:
-            return 0.0, 0.0
-        lat = math.degrees(math.asin(z / r))
-        lon = math.degrees(math.atan2(y, x))
-        # Normalizar lon a [-180, 180]
-        lon = (lon + 180.0) % 360.0 - 180.0
-        return lat, lon
-
-    # Parámetros para “forzar” la traza a una forma sinusoidal visible
-    k = 2.0 * math.pi / 180.0
-    phase = 0.0
-    last_len = {"n": 0}
-
-    def actualizar_mapa():
-        """Actualiza la traza sobre el mapa con los datos actuales de órbita."""
-        if len(x_orbit) != last_len["n"] and x_orbit and y_orbit and z_orbit:
-            last_len["n"] = len(x_orbit)
-
-            # Calcular latitud/longitud real (aunque luego se use una versión “forzada”)
-            lats_real = []
-            lons_real = []
-            for X, Y, Z in zip(x_orbit, y_orbit, z_orbit):
-                lat_r, lon_r = xyz_to_latlon_simple(X, Y, Z)
-                lats_real.append(lat_r)
-                lons_real.append(lon_r)
-
-            # Elegir amplitud de la senoide en función de latitudes recientes
-            if lats_real:
-                N = min(500, len(lats_real))
-                lat_slice = lats_real[-N:]
-                amp = max(60.0, min(89.0, max(abs(v) for v in lat_slice)))
-            else:
-                amp = 75.0
-
-            # Generar latitudes “forzadas” sinusoidales
-            lats_forzadas = [amp * math.sin(k * lon_r + phase)
-                             for lon_r in lons_real]
-
-            # Evitar líneas cruzando todo el mapa cuando se pasa de -180 a 180
-            lons_plot = [lons_real[0]]
-            lats_plot = [lats_forzadas[0]]
-            for idx in range(1, len(lons_real)):
-                lon_prev = lons_real[idx - 1]
-                lon_cur = lons_real[idx]
-                lat_cur = lats_forzadas[idx]
-                if abs(lon_cur - lon_prev) > 180:
-                    lons_plot.append(float('nan'))
-                    lats_plot.append(float('nan'))
-                lons_plot.append(lon_cur)
-                lats_plot.append(lat_cur)
-
-            track_line.set_data(lons_plot, lats_plot)
-
-            # Posición actual del satélite
-            lon_last = lons_real[-1]
-            lat_last = lats_forzadas[-1]
-            sat_point.set_data([lon_last], [lat_last])
-
-            # No tocar xlim/ylim para mantener el mapa completo
-            canvas_map.draw()
-
-        window.after(800, actualizar_mapa)
-
-    actualizar_mapa()
-
-# Crear figuras iniciales de órbita y mapa
-crear_orbita_3d()
-crear_orbita_mapa()
-show_orbit_mode()
-
-# =================== 2) RADAR ===================
-
-add_fullscreen_header(frame_radar, "Radar ultrasónico + Servo / Ultras")
+# ---------- RADAR (barrido servo) ----------
+add_header(frame_radar, "Radar ultrasónico / Servo")
 
 radar_outer = Frame(frame_radar, bg=CARD_BG)
 radar_outer.grid(row=1, column=0, sticky="nsew", padx=4, pady=4)
@@ -648,92 +550,72 @@ radar_canvas_frame.grid(row=0, column=0, sticky="nsew")
 radar_canvas_frame.grid_rowconfigure(0, weight=1)
 radar_canvas_frame.grid_columnconfigure(0, weight=1)
 
-# Frame con controles del radar (ángulo, intervalo, etc.)
-radar_ctrl_frame = Frame(radar_outer, bg="black")
+radar_ctrl_frame = Frame(radar_outer, bg=CARD_ALT)
 radar_ctrl_frame.grid(row=1, column=0, sticky="ew", pady=(8, 0), padx=4)
-for c in range(3):
+for c in range(5):
     radar_ctrl_frame.grid_columnconfigure(c, weight=1)
 
 def abrir_radar():
-    """
-    Crea la figura del radar en modo polar y la integra en radar_canvas_frame.
-    Incluye un haz que se mueve y ecos persistentes.
-    """
     for w in radar_canvas_frame.winfo_children():
         w.destroy()
 
-    fig_radar = Figure(figsize=(5.0, 3.4), dpi=100)
+    fig_radar = Figure(figsize=(5.0, 3.0), dpi=100)
     ax_r = fig_radar.add_subplot(111, polar=True)
 
-    fig_radar.patch.set_facecolor(CARD_BG)
+    fig_radar.patch.set_facecolor("black")
     ax_r.set_facecolor("black")
 
-    # Configuración polar: 0° en el norte y barrido -90° a 90°
     ax_r.set_theta_zero_location('N')
     ax_r.set_theta_direction(1)
     ax_r.set_thetamin(-90)
     ax_r.set_thetamax(90)
 
-    # Limites de radio (distancia)
     ax_r.set_rlim(0, 400)
     ax_r.set_rticks(range(0, 401, 50))
-    ax_r.set_yticklabels([str(r) for r in range(0, 401, 50)],
-                         color="#00ff80", fontsize=9)
-
-    # Marcas de ángulo cada 30°
+    ax_r.set_yticklabels([str(r) for r in range(0, 401, 50)], color="lime")
+    ax_r.yaxis.set_tick_params(labelsize=7, pad=4)
     ang_ticks = np.deg2rad(np.arange(-90, 91, 30))
     ax_r.set_xticks(ang_ticks)
     ax_r.set_xticklabels([f"{deg}°" for deg in range(-90, 91, 30)],
-                         color="#00ff80", fontsize=9)
+                         color="lime", fontsize=8)
 
-    ax_r.grid(color="#008000", alpha=0.4)
-    ax_r.spines['polar'].set_color("#00ff80")
-    ax_r.tick_params(colors="#00ff80")
+    ax_r.grid(color="green", alpha=0.4)
+    ax_r.spines['polar'].set_color("lime")
+    ax_r.tick_params(colors="lime")
+    ax_r.set_title("Radar ultrasónico", color="lime", pad=12, fontsize=9)
 
-    ax_r.set_title("Radar ultrasónico", color='lime', pad=20)
-
-    # Texto informativo sobre el último eco
     info_text = ax_r.text(0.5, 0.96, "", transform=ax_r.transAxes,
-                          ha="center", va="bottom", color="white", fontsize=10)
+                          ha="center", va="bottom", color="lime", fontsize=8)
 
-    fig_radar.subplots_adjust(top=0.90, bottom=0.05, left=0.05, right=0.95)
+    fig_radar.subplots_adjust(top=0.88, bottom=0.05, left=0.05, right=0.95)
 
     canvas_r = FigureCanvasTkAgg(fig_radar, master=radar_canvas_frame)
     canvas_r.draw()
     canvas_r.get_tk_widget().grid(row=0, column=0, sticky="nsew")
 
-    # Línea principal del haz
-    beam_line, = ax_r.plot([], [], color="#00ff80", linewidth=2)
+    beam_line, = ax_r.plot([], [], color="lime", linewidth=2)
 
-    # Líneas de “rastro” del haz
     trail_length = 30
     trail_lines = []
     for i_local in range(trail_length):
         alpha = max(0, 0.4 - i_local * 0.012)
-        line, = ax_r.plot([], [], color="#00ff80", linewidth=1.2, alpha=alpha)
+        line, = ax_r.plot([], [], color="lime", linewidth=1.0, alpha=alpha)
         trail_lines.append(line)
 
-    # Scatter para ecos (puntos detectados)
-    echo_scatter = ax_r.scatter([], [], s=40, c="#00ff00")
+    echo_scatter = ax_r.scatter([], [], s=30, c="green")
 
     frame_counter = {"n": 0}
 
     def actualizar_radar_local():
-        """
-        Simula barrido del haz y muestra ecos almacenados en radar_echoes.
-        Se llama periódicamente con window.after.
-        """
         frame_counter["n"] += 1
 
-        # Barrido de -90 a 90 grados
+        # El barrido visual siempre activo (solo es animación local)
         angle_deg = -90 + (frame_counter["n"] * 2.0) % 180
         angle = math.radians(angle_deg)
-
         r = np.linspace(0, 400, 200)
         theta = np.full_like(r, angle)
         beam_line.set_data(theta, r)
 
-        # Desplazar datos para el efecto de estela
         prev_theta, prev_r = beam_line.get_data()
         last_theta, last_r = prev_theta, prev_r
         for line in trail_lines:
@@ -741,7 +623,6 @@ def abrir_radar():
             line.set_data(last_theta, last_r)
             last_theta, last_r = lt, lr
 
-        # Gestionar lista de ecos y su “edad”
         if radar_echoes:
             vivos = []
             for eco in radar_echoes:
@@ -761,7 +642,7 @@ def abrir_radar():
 
                 ang_last = radar_echoes[-1]["ang"]
                 dist_last = radar_echoes[-1]["dist"]
-                info_text.set_text(f"Ángulo: {ang_last:.1f}°  Distancia: {dist_last:.1f} cm")
+                info_text.set_text(f"Ángulo: {ang_last:.1f}°  Dist: {dist_last:.1f} cm")
             else:
                 echo_scatter.set_offsets(np.empty((0, 2)))
                 echo_scatter.set_color([])
@@ -776,24 +657,20 @@ def abrir_radar():
 
     actualizar_radar_local()
 
-# Crear radar al inicio
 abrir_radar()
 
-# ----- Controles del radar (servo y ultrasonidos) -----
-
 Label(radar_ctrl_frame, text="Ángulo servo (0-180°):",
-      bg="black", fg=TEXT_FG, font=LABEL_FONT).grid(
+      bg=CARD_ALT, fg=TEXT_FG, font=LABEL_FONT).grid(
     row=0, column=0, sticky="e", pady=2, padx=4
 )
 anguloVar = IntVar(value=0)
 Entry(radar_ctrl_frame, textvariable=anguloVar, width=6,
-      bg="#2b2b2b", fg=TEXT_FG, insertbackground=TEXT_FG,
+      bg="#020617", fg=TEXT_FG, insertbackground=TEXT_FG,
       relief="flat", font=ENTRY_FONT).grid(
     row=0, column=1, sticky="w", padx=(4, 4), pady=2
 )
 
 def enviar_angulo():
-    """Envía un ángulo de servo al Arduino por serie."""
     try:
         ang = int(anguloVar.get())
         if 0 <= ang <= 180:
@@ -804,19 +681,19 @@ def enviar_angulo():
     except:
         messagebox.showerror("Error", "Ángulo inválido")
 
-Label(radar_ctrl_frame, text="Intervalo ultrasonidos (ms):",
-      bg="black", fg=TEXT_FG, font=LABEL_FONT).grid(
+Label(radar_ctrl_frame, text="Intervalo ultra (ms):",
+      bg=CARD_ALT, fg=TEXT_FG, font=LABEL_FONT).grid(
     row=1, column=0, sticky="e", pady=2, padx=4
 )
 intervaloUltraVar = IntVar(value=300)
-Spinbox(radar_ctrl_frame, from_=50, to=10000, textvariable=intervaloUltraVar, width=8,
-        bg="#2b2b2b", fg=TEXT_FG, buttonbackground="#444444",
-        relief="flat", font=ENTRY_FONT).grid(
+Spinbox(radar_ctrl_frame, from_=50, to=10000, textvariable=intervaloUltraVar, width=7,
+        bg="#020617", fg=TEXT_FG,
+        buttonbackground="#1e293b", relief="flat",
+        font=ENTRY_FONT).grid(
     row=1, column=1, sticky="w", padx=(4, 4), pady=2
 )
 
 def send_intervalo_ultra():
-    """Envía el intervalo de medición del ultrasonido al Arduino."""
     try:
         ms = int(intervaloUltraVar.get())
         mySerial.write(f"7:{ms}\n".encode())
@@ -824,119 +701,153 @@ def send_intervalo_ultra():
         messagebox.showerror("Error", "Intervalo ultrasonidos inválido")
     registrar_evento("COMANDOS", f"Enviar intervalo ultrasonidos: {intervaloUltraVar.get()}ms")
 
-Button(radar_ctrl_frame, text="Enviar ángulo servo", command=enviar_angulo,
-       bg="#3b4252", fg="#eceff4", relief="flat",
-       font=BTN_FONT, width=15).grid(
-    row=2, column=0, pady=4, padx=4, sticky="w"
+Button(radar_ctrl_frame, text="Ángulo servo", command=enviar_angulo,
+       bg=ACCENT, fg="#020617", relief="flat",
+       font=BTN_FONT, width=BTN_WIDTH).grid(
+    row=2, column=0, pady=4, padx=2, sticky="w"
 )
 
-Button(radar_ctrl_frame, text="Enviar intervalo ultra", command=send_intervalo_ultra,
-       bg="#3b4252", fg="#eceff4", relief="flat",
-       font=BTN_FONT, width=18).grid(
-    row=2, column=1, pady=4, padx=4, sticky="w"
+Button(radar_ctrl_frame, text="Intervalo ultra", command=send_intervalo_ultra,
+       bg=ACCENT_2, fg="#020617", relief="flat",
+       font=BTN_FONT, width=BTN_WIDTH).grid(
+    row=2, column=1, pady=4, padx=2, sticky="w"
 )
 
-# Asociar este frame de control al radar para que aparezca en fullscreen
-register_controls_frame(frame_radar, radar_ctrl_frame)
-radar_ctrl_frame.grid_remove()
+def detener_barrido_servo():
+    # case 6 del satélite: modoBarrido = false si recibe "6:0"
+    try:
+        mySerial.write(b"6:0\n")
+        registrar_evento("COMANDOS", "Detener barrido servo (satélite)")
+    except:
+        messagebox.showerror("Error", "No se pudo enviar comando de detener barrido")
 
-# =================== 3) GRÁFICAS ===================
+def reanudar_barrido_servo():
+    # case 6 del satélite: modoBarrido = true si recibe "6:1"
+    try:
+        mySerial.write(b"6:1\n")
+        registrar_evento("COMANDOS", "Reanudar barrido servo (satélite)")
+    except:
+        messagebox.showerror("Error", "No se pudo enviar comando de reanudar barrido")
 
-add_fullscreen_header(frame_graf, "Gráficas / Medias / DHT / Control")
+Button(radar_ctrl_frame, text="Detener barrido servo",
+       command=detener_barrido_servo,
+       bg="#f97373", fg="#020617", relief="flat",
+       font=BTN_FONT, width=BTN_WIDTH+2).grid(
+    row=2, column=2, pady=4, padx=2, sticky="w"
+)
+
+Button(radar_ctrl_frame, text="Reanudar barrido servo",
+       command=reanudar_barrido_servo,
+       bg="#16a34a", fg="#020617", relief="flat",
+       font=BTN_FONT, width=BTN_WIDTH+2).grid(
+    row=2, column=3, pady=4, padx=2, sticky="w"
+)
+
+# ---------- GRÁFICAS (controles pequeños, una columna) ----------
+graf_header = add_header(frame_graf, "Gráficas / Medias / DHT / Control")
 
 graf_outer = Frame(frame_graf, bg=CARD_BG)
 graf_outer.grid(row=1, column=0, sticky="nsew", padx=4, pady=4)
-graf_outer.grid_rowconfigure(0, weight=3)
-graf_outer.grid_rowconfigure(1, weight=1)
-graf_outer.grid_columnconfigure(0, weight=1)
+graf_outer.grid_rowconfigure(0, weight=1)
+graf_outer.grid_columnconfigure(0, weight=3)
+graf_outer.grid_columnconfigure(1, weight=1)
 
 content_graf = Frame(graf_outer, bg=CARD_BG)
 content_graf.grid(row=0, column=0, sticky="nsew", padx=2, pady=2)
 content_graf.grid_rowconfigure(0, weight=1)
 content_graf.grid_columnconfigure(0, weight=1)
 
-# Figura con 3 subgráficos: Temp, Humedad y Media móvil
-fig = Figure(figsize=(4.0, 2.7), dpi=100)
+fig = Figure(figsize=(5.5, 3.4), dpi=100)
 gs = fig.add_gridspec(3, 1, height_ratios=[2.0, 1.0, 1.0])
 ax1 = fig.add_subplot(gs[0, 0])
 ax2 = fig.add_subplot(gs[1, 0])
 ax3 = fig.add_subplot(gs[2, 0])
 
-fig.subplots_adjust(top=0.93, bottom=0.12, left=0.15, right=0.98, hspace=0.8)
-
+fig.subplots_adjust(top=0.93, bottom=0.10, left=0.12, right=0.99, hspace=0.75)
 fig.patch.set_facecolor(CARD_BG)
 for ax in (ax1, ax2, ax3):
-    ax.set_facecolor("#222222")
-    ax.tick_params(colors=TEXT_FG)
-    ax.title.set_color(TEXT_FG)
+    ax.set_facecolor("#020617")
+    ax.tick_params(colors=TEXT_FG, labelsize=7)
+    ax.title.set_color(ACCENT)
+    ax.title.set_fontsize(9)
     for spine in ax.spines.values():
-        spine.set_color(TEXT_FG)
-    ax.grid(color="#444444", alpha=0.6)
+        spine.set_color("#64748b")
+    ax.grid(color="#1e293b", alpha=0.7)
 
-line_temp, = ax1.plot([], [], linestyle='-', color='#ff6b6b', label="Temperatura")
-ax1.set_title("Temperatura (°C)", pad=8)
+line_temp, = ax1.plot([], [], linestyle='-', color="#fb7185", label="Temperatura")
+ax1.set_title("Temperatura (°C)", pad=4)
 
-line_hum, = ax2.plot([], [], linestyle='-', color='#4dabf7', label="Humedad")
-ax2.set_title("Humedad (%)", pad=8)
+line_hum, = ax2.plot([], [], linestyle='-', color="#38bdf8", label="Humedad")
+ax2.set_title("Humedad (%)", pad=4)
 
-line_avg, = ax3.plot([], [], linestyle='-', color='#51cf66', label="Media móvil")
-ax3.set_title("Media móvil", pad=8)
+line_avg, = ax3.plot([], [], linestyle='-', color="#4ade80", label="Media móvil")
+ax3.set_title("Media móvil", pad=4)
 
 canvas = FigureCanvasTkAgg(fig, master=content_graf)
 canvas.draw()
 canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
 
-# ----- Panel de control de gráficas / DHT -----
-cont_inner = Frame(graf_outer, bg="black")
-cont_inner.grid(row=1, column=0, sticky="nsew", padx=4, pady=(8, 0))
-
-for r in range(10):
+cont_inner = Frame(graf_outer, bg=CARD_ALT)
+cont_inner.grid(row=0, column=1, sticky="nsew", padx=4, pady=(2, 2))
+for r in range(15):
     cont_inner.grid_rowconfigure(r, weight=0)
-cont_inner.grid_rowconfigure(9, weight=1)
-for c in range(3):
-    cont_inner.grid_columnconfigure(c, weight=1)
+cont_inner.grid_rowconfigure(14, weight=1)
+cont_inner.grid_columnconfigure(0, weight=1)
 
-Label(cont_inner, text="Ground Station v2.7",
-      bg="black", fg=TEXT_FG, font=("Segoe UI", 12, "bold")).grid(
-    row=0, column=0, columnspan=3, sticky="w", pady=(0, 4)
+Label(cont_inner, text="Ground Station v3.0",
+      bg=CARD_ALT, fg=ACCENT, font=("Segoe UI", 9, "bold")).grid(
+    row=0, column=0, sticky="w", pady=(0, 4), padx=4
 )
 
 Label(cont_inner, text="Límite temperatura (°C):",
-      bg="black", fg=TEXT_FG, font=LABEL_FONT).grid(
-    row=1, column=0, sticky="w", pady=2
+      bg=CARD_ALT, fg=TEXT_FG, font=LABEL_FONT).grid(
+    row=1, column=0, sticky="w", pady=1, padx=4
 )
 limiteVar = StringVar(value=str(limite_temp))
-Entry(cont_inner, textvariable=limiteVar, width=8,
-      bg="#2b2b2b", fg=TEXT_FG, insertbackground=TEXT_FG,
+Entry(cont_inner, textvariable=limiteVar, width=10,
+      bg="#020617", fg=TEXT_FG, insertbackground=TEXT_FG,
       relief="flat", font=ENTRY_FONT).grid(
-    row=1, column=1, sticky="w", padx=(4, 4), pady=2
+    row=2, column=0, sticky="w", padx=(4, 4), pady=1
 )
 
 Label(cont_inner, text="Ventana media móvil (N):",
-      bg="black", fg=TEXT_FG, font=LABEL_FONT).grid(
-    row=2, column=0, sticky="w", pady=2
+      bg=CARD_ALT, fg=TEXT_FG, font=LABEL_FONT).grid(
+    row=3, column=0, sticky="w", pady=1, padx=4
 )
 ventanaVar = IntVar(value=ventana_default)
-Spinbox(cont_inner, from_=1, to=200, textvariable=ventanaVar, width=6,
-        bg="#2b2b2b", fg=TEXT_FG, buttonbackground="#444444",
+
+def recalcular_media():
+    global media_movil
+    N = max(1, int(ventanaVar.get()))
+    nueva_media = []
+    for j in range(len(temperaturas)):
+        if j + 1 >= N:
+            ventana = temperaturas[j + 1 - N:j + 1]
+        else:
+            ventana = temperaturas[:j + 1]
+        nueva_media.append(sum(ventana) / len(ventana))
+    media_movil = nueva_media
+    actualizar_graficas(force=True)
+
+Spinbox(cont_inner, from_=1, to=200, textvariable=ventanaVar, width=10,
+        bg="#020617", fg=TEXT_FG, buttonbackground="#1e293b",
         relief="flat", font=ENTRY_FONT).grid(
-    row=2, column=1, sticky="w", padx=(4, 4), pady=2
+    row=4, column=0, sticky="w", padx=(4, 4), pady=1
 )
 ventanaVar.trace_add("write", lambda *args: recalcular_media())
 
 Label(cont_inner, text="Intervalo envío DHT (s):",
-      bg="black", fg=TEXT_FG, font=LABEL_FONT).grid(
-    row=3, column=0, sticky="w", pady=2
+      bg=CARD_ALT, fg=TEXT_FG, font=LABEL_FONT).grid(
+    row=5, column=0, sticky="w", pady=1, padx=4
 )
 intervaloDHTVar = IntVar(value=3)
-Spinbox(cont_inner, from_=1, to=3600, textvariable=intervaloDHTVar, width=6,
-        bg="#2b2b2b", fg=TEXT_FG, buttonbackground="#444444",
+Spinbox(cont_inner, from_=1, to=3600, textvariable=intervaloDHTVar, width=10,
+        bg="#020617", fg=TEXT_FG, buttonbackground="#1e293b",
         relief="flat", font=ENTRY_FONT).grid(
-    row=3, column=1, sticky="w", padx=(4, 4), pady=2
+    row=6, column=0, sticky="w", padx=(4, 4), pady=1
 )
 
 def send_intervalo_dht():
-    """Envía el intervalo de lectura DHT al Arduino."""
     try:
         s = int(intervaloDHTVar.get())
         mySerial.write(f"1:{s}\n".encode())
@@ -945,19 +856,16 @@ def send_intervalo_dht():
     registrar_evento("COMANDOS", f"Enviar intervalo DHT: {intervaloDHTVar.get()}s")
 
 Label(cont_inner, text="Dónde calcular la media:",
-      bg="black", fg=TEXT_FG, font=LABEL_FONT).grid(
-    row=4, column=0, sticky="w", pady=(8, 2)
+      bg=CARD_ALT, fg=TEXT_FG, font=LABEL_FONT).grid(
+    row=7, column=0, sticky="w", pady=(6, 1), padx=4
 )
-
 modoVar = StringVar(value="python")
 
 def modo_media_changed():
-    """Cambia entre media calculada en Python o en Arduino."""
     global modo_media
     modo_media = modoVar.get()
     if modo_media == "arduino":
         try:
-            # Activar cálculo de media en Arduino
             mySerial.write(b"8:1\n")
             time.sleep(0.05)
             n = int(ventanaVar.get())
@@ -966,36 +874,32 @@ def modo_media_changed():
             pass
     else:
         try:
-            # Desactivar cálculo de media en Arduino (usar Python)
             mySerial.write(b"8:0\n")
         except:
             pass
 
 Radiobutton(cont_inner, text="Python (local)", variable=modoVar, value="python",
-            command=modo_media_changed, bg="black", fg=TEXT_FG,
-            selectcolor="#333333", font=LABEL_FONT).grid(
-    row=4, column=1, sticky="w", pady=(8, 2)
+            command=modo_media_changed, bg=CARD_ALT, fg=TEXT_FG,
+            selectcolor="#020617", font=("Segoe UI", 8)).grid(
+    row=8, column=0, sticky="w", pady=(1, 1), padx=4
 )
 Radiobutton(cont_inner, text="Arduino (remoto)", variable=modoVar, value="arduino",
-            command=modo_media_changed, bg="black", fg=TEXT_FG,
-            selectcolor="#333333", font=LABEL_FONT).grid(
-    row=4, column=2, sticky="w", pady=(8, 2)
+            command=modo_media_changed, bg=CARD_ALT, fg=TEXT_FG,
+            selectcolor="#020617", font=("Segoe UI", 8)).grid(
+    row=9, column=0, sticky="w", pady=(1, 4), padx=4
 )
 
 Label(cont_inner, text="Estado alarma (medias):",
-      bg="black", fg=TEXT_FG, font=LABEL_FONT).grid(
-    row=5, column=0, sticky="w", pady=(8, 2)
+      bg=CARD_ALT, fg=TEXT_FG, font=LABEL_FONT).grid(
+    row=10, column=0, sticky="w", pady=(4, 1), padx=4
 )
-alarma_media_label = Label(cont_inner, text="NORMAL", bg="lightgreen",
-                           fg='black', width=18, font=("Segoe UI", 11, "bold"))
-alarma_media_label.grid(row=5, column=1, sticky="w", padx=(4, 4), pady=(8, 2))
+alarma_media_label = Label(cont_inner, text="NORMAL", bg=OK_COLOR,
+                           fg='#020617', width=16, font=("Segoe UI", 9, "bold"))
+alarma_media_label.grid(row=11, column=0, sticky="w", padx=(4, 4), pady=(1, 4))
 
-row_btn = 6
-
-# ----- Botones de control principal (lectura, stop, reset) -----
+row_btn = 12
 
 def IniciarClick():
-    """Inicia la lectura periódica desde el puerto serie."""
     global lectura_activa
     lectura_activa = True
     try:
@@ -1005,7 +909,6 @@ def IniciarClick():
     ciclo_lectura()
 
 def PararClick():
-    """Detiene la lectura periódica desde el puerto serie."""
     global lectura_activa
     lectura_activa = False
     try:
@@ -1014,7 +917,6 @@ def PararClick():
         pass
 
 def ResetClick():
-    """Resetea todas las series de datos y estados de alerta."""
     global temperaturas, humedades, eje_x, media_movil, i
     global radar_echoes, alerta_activa, alerta_media_activa
     global x_orbit, y_orbit, z_orbit
@@ -1029,46 +931,43 @@ def ResetClick():
     z_orbit = []
     alerta_activa = False
     alerta_media_activa = False
-    alarma_media_label.config(text="Normal", bg="lightgreen")
+    alarma_media_label.config(text="Normal", bg=OK_COLOR)
     try:
         mySerial.write(b'6:1\n')
     except:
         pass
     actualizar_graficas(force=True)
 
-Button(cont_inner, text="Iniciar", bg="#19BB0A", fg='white',
-       command=IniciarClick, width=12, font=BTN_FONT).grid(
-    row=row_btn, column=0, pady=BTN_PADY, padx=2, sticky="w"
-)
-Button(cont_inner, text="Parar", bg="#E50606", fg='white',
-       command=PararClick, width=12, font=BTN_FONT).grid(
-    row=row_btn, column=1, pady=BTN_PADY, padx=2, sticky="w"
-)
-Button(cont_inner, text="Reset", bg="#EFE410", fg='black',
-       command=ResetClick, width=12, font=BTN_FONT).grid(
-    row=row_btn, column=2, pady=BTN_PADY, padx=2, sticky="w"
+Button(cont_inner, text="Iniciar", bg=OK_COLOR, fg='#020617',
+       command=IniciarClick, width=BTN_WIDTH, font=BTN_FONT, relief="flat").grid(
+    row=row_btn, column=0, pady=BTN_PADY, padx=4, sticky="w"
 )
 row_btn += 1
 
-Button(cont_inner, text="Enviar intervalos DHT+Ultra",
+Button(cont_inner, text="Parar", bg=DANGER, fg='#020617',
+       command=PararClick, width=BTN_WIDTH, font=BTN_FONT, relief="flat").grid(
+    row=row_btn, column=0, pady=BTN_PADY, padx=4, sticky="w"
+)
+row_btn += 1
+
+Button(cont_inner, text="Reset", bg="#facc15", fg='#020617',
+       command=ResetClick, width=BTN_WIDTH, font=BTN_FONT, relief="flat").grid(
+    row=row_btn, column=0, pady=BTN_PADY, padx=4, sticky="w"
+)
+row_btn += 1
+
+Button(cont_inner, text="Enviar DHT+Ultra",
        command=lambda: (send_intervalo_dht(), send_intervalo_ultra()),
-       bg="#3b4252", fg="#eceff4", relief="flat",
-       font=BTN_FONT, width=24).grid(
-    row=row_btn, column=0, columnspan=3, pady=BTN_PADY, padx=2, sticky="w"
+       bg="#1d4ed8", fg="#e5f2ff", relief="flat",
+       font=BTN_FONT, width=BTN_WIDTH).grid(
+    row=row_btn, column=0, pady=BTN_PADY, padx=4, sticky="w"
 )
 
-# Asociar este panel de control al frame de gráficas (para fullscreen)
-register_controls_frame(frame_graf, cont_inner)
-cont_inner.grid_remove()
-
-# =================== Funciones de dibujo y lectura serie ===================
-
+# =================== GRÁFICAS Y SERIE ===================
 def actualizar_graficas(force=False):
-    """Actualiza las líneas de temperatura, humedad y media móvil."""
     line_temp.set_data(eje_x, temperaturas)
     line_hum.set_data(eje_x, humedades)
 
-    # Limpiar NaN para la media
     media_plot = []
     for m in media_movil:
         if m is None or (isinstance(m, float) and math.isnan(m)):
@@ -1085,10 +984,6 @@ def actualizar_graficas(force=False):
     canvas.draw()
 
 def leer_serial():
-    """
-    Lee todos los mensajes disponibles del puerto serie, los interpreta y
-    actualiza las estructuras de datos de gráficas, radar y órbita.
-    """
     global i, alerta_activa, alerta_media_activa, last_angle_received, last_dht_accepted_ms
 
     try:
@@ -1097,7 +992,6 @@ def leer_serial():
             if not raw:
                 continue
 
-            # Soporte para mensajes con checksum prefijados con "CHK:"
             if raw.startswith("CHK:"):
                 try:
                     partes = raw.split(':')
@@ -1118,10 +1012,8 @@ def leer_serial():
             trozos = raw.split(':')
             now_ms = int(time.time() * 1000)
 
-            # Mensajes tipo 1: DHT (temperatura/humedad)
             if len(trozos) >= 3 and trozos[0] == '1':
                 intervalo_ms = max(0, int(intervaloDHTVar.get())) * 1000
-                # Filtro por intervalo mínimo entre muestras aceptadas
                 if intervalo_ms == 0 or now_ms - last_dht_accepted_ms >= intervalo_ms:
                     last_dht_accepted_ms = now_ms
                     try:
@@ -1134,7 +1026,6 @@ def leer_serial():
                     humedades.append(hum)
                     i += 1
 
-                    # Cálculo de media móvil local o uso de valor remoto
                     N = max(1, int(ventanaVar.get()))
                     if modoVar.get() == "arduino" and len(trozos) >= 5 and trozos[3] == 'A':
                         try:
@@ -1146,28 +1037,25 @@ def leer_serial():
                         media_movil.append(
                             sum(temperaturas[-N:]) / N if len(temperaturas) >= N else float('nan'))
 
-                    # Alertas de temperatura instantánea (últimas 3 muestras)
                     if len(temperaturas) >= 3 and all(
                             x > float(limiteVar.get()) for x in temperaturas[-3:]) and not alerta_activa:
                         alerta_activa = True
                         messagebox.showwarning("Alerta", f"Últimas 3 temperaturas superan {limiteVar.get()} °C")
-                        registrar_evento("ERRORES",
-                                         f"Alerta temperatura: últimas 3 superan {limiteVar.get()} °C")
+                        registrar_evento("ALERTA",
+                                         f"Temperatura alta: últimas 3 superan {limiteVar.get()} °C")
                     elif alerta_activa and len(temperaturas) >= 3 and not all(
                             x > float(limiteVar.get()) for x in temperaturas[-3:]):
                         alerta_activa = False
 
-                    # Alertas basadas en la media móvil (últimas 3 medias válidas)
                     medias_validas = [m for m in media_movil if not (isinstance(m, float) and math.isnan(m))]
                     if len(medias_validas) >= 3 and all(
                             m > float(limiteVar.get()) for m in medias_validas[-3:]):
                         alerta_media_activa = True
-                        alarma_media_label.config(text="Peligro", bg="red")
+                        alarma_media_label.config(text="Peligro", bg=DANGER)
                     else:
                         alerta_media_activa = False
-                        alarma_media_label.config(text="Normal", bg="lightgreen")
+                        alarma_media_label.config(text="Normal", bg=OK_COLOR)
 
-            # Mensajes tipo 2: Radar (ángulo y distancia)
             elif len(trozos) >= 3 and trozos[0] == '2':
                 try:
                     ang = float(trozos[1])
@@ -1183,23 +1071,15 @@ def leer_serial():
                 except Exception as e:
                     registrar_evento("ERRORES", f"Radar inválido: {raw} ({e})")
 
-            # Mensajes tipo 3: fallo DHT
             elif trozos[0] == '3':
                 registrar_evento("ERRORES", "Satélite: fallo DHT")
-
-            # Mensajes tipo 5: info genérica de satélite
             elif trozos[0] == '5':
                 registrar_evento("INFO SATELITE", "Satélite msg: " + ":".join(trozos[1:]))
-
-            # Mensajes tipo 6: fallo sensor distancia
             elif trozos[0] == '6':
                 registrar_evento("ERRORES", "Satélite: fallo sensor distancia")
-
-            # Otros mensajes no clasificados
             else:
                 registrar_evento("INFO SATELITE", "Otro mensaje: " + raw)
 
-            # Intentar extraer datos de órbita con la regex
             match = regex_orbit.search(raw)
             if match:
                 try:
@@ -1219,14 +1099,12 @@ def leer_serial():
         registrar_evento("ERRORES", f"Error puerto serie: {e}")
 
 def ciclo_lectura():
-    """Bucle periódico: lee serie y actualiza gráficas mientras lectura_activa sea True."""
     if lectura_activa:
         leer_serial()
         actualizar_graficas()
         window.after(120, ciclo_lectura)
 
 def on_close():
-    """Manejador al cerrar la ventana principal: cierra puerto serie y destruye GUI."""
     global lectura_activa
     lectura_activa = False
     try:
@@ -1235,8 +1113,5 @@ def on_close():
         pass
     window.destroy()
 
-# Asociar cierre de ventana con on_close
 window.protocol("WM_DELETE_WINDOW", on_close)
-
-# Iniciar bucle principal de Tkinter
 window.mainloop()
