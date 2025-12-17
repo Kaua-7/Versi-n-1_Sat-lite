@@ -31,6 +31,8 @@ unsigned long intervaloHT    = 5000;
 unsigned long nextHT         = 0;
 unsigned long intervaloServo = 300;
 unsigned long nextServo      = 0;
+unsigned long intervaloUltra = 300;   // intervalo ultrasonidos (ms)
+unsigned long nextUltra      = 0;
 unsigned long intervaloOrbit = 3000;
 unsigned long nextOrbit      = 0;
 
@@ -123,7 +125,11 @@ void procesarComando(String cmd) {
   if (cmd == "Iniciar") {
     transmitiendo = true;
     modoBarrido  = true;
-    nextHT = nextServo = nextOrbit = millis();
+    unsigned long now = millis();
+    nextHT    = now;
+    nextServo = now;
+    nextUltra = now;
+    nextOrbit = now;
     sendMsg("5:INICIADO");
     return;
   }
@@ -149,7 +155,7 @@ void procesarComando(String cmd) {
     }
     case 2: {
       angulo = constrain(val.toInt(), 0, 180);
-      modoBarrido = false;
+      modoBarrido = false;          // servo pasa a modo manual, pero el ultra sigue
       servoMotor.write(angulo);
       sendMsg("5:SERVO_MANUAL=" + String(angulo));
       break;
@@ -160,7 +166,12 @@ void procesarComando(String cmd) {
       break;
     }
     case 7: {
-      sendMsg("5:ULTRA_MS=" + val);
+      // Intervalo ultrasonidos
+      unsigned long ms = val.toInt();
+      if (ms < 50) ms = 50;
+      intervaloUltra = ms;
+      nextUltra = millis() + intervaloUltra;
+      sendMsg("5:ULTRA_MS=" + String(ms));
       break;
     }
     case 8: {
@@ -199,20 +210,23 @@ void setup() {
 
 void loop() {
   while (mySerial.available()) {
-    String raw   = mySerial.readStringUntil('\n');
+    String raw    = mySerial.readStringUntil('\n');
     String limpio = limpiarChecksum(raw);
     procesarComando(limpio);
   }
 
   if (!transmitiendo) {
-    if (!modoBarrido) servoMotor.write(angulo);
+    // Si no transmite, solo mantiene el servo en su ángulo actual
+    servoMotor.write(angulo);
     return;
   }
 
-  // DHT ✅ CON DELAY
-  if (millis() >= nextHT) {
-    nextHT = millis() + intervaloHT;
-    delay(500);  // ← DHT estabilización
+  unsigned long ahora = millis();
+
+  // DHT
+  if (ahora >= nextHT) {
+    nextHT = ahora + intervaloHT;
+    delay(500);  // estabilización DHT
     float t = dht.readTemperature();
     float h = dht.readHumidity();
     if (!isnan(t) && !isnan(h)) pushTemp(t);
@@ -221,42 +235,46 @@ void loop() {
     sendMsg(msg);
   }
 
-  // SERVO + RADAR + AMENAZA ✅ YA FUNCIONA
-  if (modoBarrido) {
-    if (millis() >= nextServo) {
-      nextServo = millis() + intervaloServo;
-      angulo += PASO * direccion;
-      if (angulo >= 180 || angulo <= 0) direccion *= -1;
-      servoMotor.write(angulo);
-
-      float d = medirDistancia();
-      if (d < 0) {
-        sendMsg("6:");
-      } else {
-        String s = "2:" + String(angulo) + ":" + String(d, 2);
-        sendMsg(s);
-
-        // LÓGICA AMENAZA ✅
-        if (d > 0 && d <= 50.0) {  // ≤ 50cm
-          if (!amenazaActiva) {
-            amenazaActiva = true;
-            sendMsg("5:AMENAZA_ON");
-          }
-        } else if (d > 50.0) {
-          if (amenazaActiva) {
-            amenazaActiva = false;
-            sendMsg("5:AMENAZA_OFF");
-          }
-        }
-      }
-    }
+  // SERVO (solo barrido) + ULTRASONIDOS (siempre)
+  if (modoBarrido && (ahora >= nextServo)) {
+    nextServo = ahora + intervaloServo;
+    angulo += PASO * direccion;
+    if (angulo >= 180 || angulo <= 0) direccion *= -1;
+    servoMotor.write(angulo);
   } else {
+    // En modo manual ya se fijó angulo desde el comando case 2
     servoMotor.write(angulo);
   }
 
+  // ULTRASONIDOS independientemente del barrido
+  if (ahora >= nextUltra) {
+    nextUltra = ahora + intervaloUltra;
+
+    float d = medirDistancia();
+    if (d < 0) {
+      sendMsg("6:");
+    } else {
+      String s = "2:" + String(angulo) + ":" + String(d, 2);
+      sendMsg(s);
+
+      // LÓGICA AMENAZA
+      if (d > 0 && d <= 50.0) {  // ≤ 50cm
+        if (!amenazaActiva) {
+          amenazaActiva = true;
+          sendMsg("5:AMENAZA_ON");
+        }
+      } else if (d > 50.0) {
+        if (amenazaActiva) {
+          amenazaActiva = false;
+          sendMsg("5:AMENAZA_OFF");
+        }
+      }
+    }
+  }
+
   // ÓRBITA
-  if (millis() >= nextOrbit) {
-    nextOrbit = millis() + intervaloOrbit;
-    enviarOrbita(millis());
+  if (ahora >= nextOrbit) {
+    nextOrbit = ahora + intervaloOrbit;
+    enviarOrbita(ahora);
   }
 }
