@@ -84,7 +84,7 @@ float medirDistancia() {
   digitalWrite(TRIGPIN, HIGH); delayMicroseconds(10);
   digitalWrite(TRIGPIN, LOW);
   long duracion = pulseIn(ECHOPIN, HIGH, 25000);
-  if (duracion == 0) return -1;
+  if (duracion == 0) return -1;             // fallo / desconectado
   return duracion * 0.034 / 2.0;
 }
 
@@ -223,16 +223,23 @@ void loop() {
 
   unsigned long ahora = millis();
 
-  // DHT
+  // DHT con detección de fallo (desenchufado -> NaN)
   if (ahora >= nextHT) {
     nextHT = ahora + intervaloHT;
     delay(500);  // estabilización DHT
     float t = dht.readTemperature();
     float h = dht.readHumidity();
-    if (!isnan(t) && !isnan(h)) pushTemp(t);
-    String msg = "1:" + String(t, 2) + ":" + String(h, 2);
-    if (arduinoComputeAvg) msg += ":A:" + String(computeAvg(), 2);
-    sendMsg(msg);
+
+    if (isnan(t) || isnan(h)) {
+      // Lectura inválida: DHT desconectado o fallo → alarma "3:"
+      sendMsg("3:");
+    } else {
+      // Lectura correcta
+      pushTemp(t);
+      String msg = "1:" + String(t, 2) + ":" + String(h, 2);
+      if (arduinoComputeAvg) msg += ":A:" + String(computeAvg(), 2);
+      sendMsg(msg);
+    }
   }
 
   // SERVO (solo barrido) + ULTRASONIDOS (siempre)
@@ -252,12 +259,13 @@ void loop() {
 
     float d = medirDistancia();
     if (d < 0) {
+      // Desenchufado / sin eco → alarma "6:"
       sendMsg("6:");
     } else {
       String s = "2:" + String(angulo) + ":" + String(d, 2);
       sendMsg(s);
 
-      // LÓGICA AMENAZA
+      // LÓGICA AMENAZA (solo ON/OFF, no es fallo de sensor)
       if (d > 0 && d <= 50.0) {  // ≤ 50cm
         if (!amenazaActiva) {
           amenazaActiva = true;
